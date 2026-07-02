@@ -1,0 +1,15 @@
+# LoRA fine-tuning / local inference dependencies.
+# Only needed for train_lora_local.py and infer_lora_local.py.
+# Requires a CUDA-capable GPU. Install a torch build matching your CUDA
+# version first (see https://pytorch.org/get-started/locally/), e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# then:
+#   pip install -r requirements-train.txt
+
+transformers>=4.46.0
+datasets>=3.0.0
+peft>=0.13.0
+accelerate>=1.0.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+protobuf>=5.0.0
