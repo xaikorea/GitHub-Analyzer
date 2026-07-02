@@ -107,5 +107,11 @@ def main():
     # Run the flow
     tutorial_flow.run(shared)
 
+    # Emit a machine-readable marker so callers (e.g. the Streamlit app)
+    # can pick up the exact output directory instead of guessing by mtime.
+    final_dir = shared.get("final_output_dir")
+    if final_dir:
+        print(f"RESULT_DIR::{final_dir}")
+
 if __name__ == "__main__":
     main()

@@ -89,15 +89,51 @@ class IdentifyAbstractions(Node):
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
         max_abstraction_num = shared.get("max_abstraction_num", 10)  # Get max_abstraction_num, default to 10
 
-        # Helper to create context from files, respecting limits (basic example)
+        # Helper to create context from files, respecting a total-size budget.
         def create_llm_context(files_data):
-            context = ""
-            file_info = []  # Store tuples of (index, path)
+            # Total-context budget (chars) to avoid sending a pathologically
+            # large single prompt for big repos. Configurable via
+            # MAX_ABSTRACTION_CONTEXT_CHARS (<=0 means unlimited). The default
+            # is generous so typical repos are unaffected; when exceeded we
+            # drop the LARGEST files first and log exactly what was omitted
+            # (never silently truncate).
+            try:
+                budget = int(os.getenv("MAX_ABSTRACTION_CONTEXT_CHARS", "900000"))
+            except ValueError:
+                budget = 900000
+
+            entries = []  # (index, path, entry_str, size)
             for i, (path, content) in enumerate(files_data):
                 entry = f"--- File Index {i}: {path} ---\n{content}\n\n"
-                context += entry
-                file_info.append((i, path))
+                entries.append((i, path, entry, len(entry)))
 
+            total = sum(e[3] for e in entries)
+            dropped = []
+            if budget > 0 and total > budget:
+                # Greedily drop the largest files until within budget,
+                # keeping the remaining files in original index order.
+                keep = [True] * len(entries)
+                running = total
+                for k in sorted(range(len(entries)), key=lambda j: entries[j][3], reverse=True):
+                    if running <= budget:
+                        break
+                    keep[k] = False
+                    running -= entries[k][3]
+                    dropped.append((entries[k][0], entries[k][1], entries[k][3]))
+                kept = [entries[k] for k in range(len(entries)) if keep[k]]
+            else:
+                kept = entries
+
+            if dropped:
+                print(
+                    f"WARNING: codebase context ({total} chars) exceeds budget ({budget}). "
+                    f"Dropping {len(dropped)} largest file(s) from abstraction analysis:"
+                )
+                for idx, path, size in sorted(dropped, key=lambda x: x[2], reverse=True):
+                    print(f"  - dropped index {idx}: {path} ({size} chars)")
+
+            context = "".join(e[2] for e in kept)
+            file_info = [(e[0], e[1]) for e in kept]
             return context, file_info  # file_info is list of (index, path)
 
         context, file_info = create_llm_context(files_data)
