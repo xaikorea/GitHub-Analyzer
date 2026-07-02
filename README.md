@@ -1,178 +1,183 @@
-<h1 align="center">Turns Codebase into Easy Tutorial with AI</h1>
+<h1 align="center">GitHub Analyzer</h1>
+
+<p align="center">
+  <b>Turn any GitHub repository into a searchable, chat‑able knowledge base.</b><br>
+  AI‑generated codebase tutorials · Postgres/pgvector RAG · streaming chat · ontology graph · LoRA fine‑tuning.
+</p>
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
- <a href="https://discord.gg/hUHHE9Sa6T">
-    <img src="https://img.shields.io/discord/1346833819172601907?logo=discord&style=flat">
-</a>
-> *Ever stared at a new codebase written by others feeling completely lost? This tutorial shows you how to build an AI agent that analyzes GitHub repositories and creates beginner-friendly tutorials explaining exactly how the code works.*
 
-<p align="center">
-  <img
-    src="./assets/banner.png" width="800"
-  />
-</p>
+---
 
-This is a tutorial project of [Pocket Flow](https://github.com/The-Pocket/PocketFlow), a 100-line LLM framework. It crawls GitHub repositories and builds a knowledge base from the code. It analyzes entire codebases to identify core abstractions and how they interact, and transforms complex code into beginner-friendly tutorials with clear visualizations.
+## 개요 (한국어)
 
+GitHub Analyzer는 공개/로컬 코드베이스를 크롤링해 **초보자용 튜토리얼**을 자동 생성하고, 그 결과를
+**Supabase(Postgres + pgvector)** 에 저장한 뒤 **Streamlit 앱**에서 검색·대화·시각화할 수 있게 해줍니다.
 
-- Check out the [book "Crack Any Codebase with AI"](https://www.manning.com/books/crack-any-codebase-with-ai) for more! 
- 
-- Check out the [YouTube Development Tutorial](https://youtu.be/AFY67zOpbSo) for more!
+- **Generate & Save** — GitHub repo → 튜토리얼(챕터 + Mermaid 다이어그램) 생성 후 DB 저장
+- **RAG Search** — 하이브리드(벡터 + 키워드) 검색으로 질문에 근거 있는 답변
+- **Chat** — 저장된 코드베이스 지식으로 멀티턴 스트리밍 대화
+- **Ontology RAG** — Mermaid/챕터/링크에서 추출한 개념 그래프
+- **Admin** — 튜토리얼 또는 **레포지토리 전체**를 관련 데이터까지 한 번에 삭제
+- **Fine‑tuning** — 생성된 튜토리얼로 로컬 LoRA 학습(선택)
 
-- Check out the [Substack Post Tutorial](https://zacharyhuang.substack.com/p/ai-codebase-knowledge-builder-full) for more!
+> Built on [Pocket Flow](https://github.com/The-Pocket/PocketFlow), the 100‑line LLM framework, and originally
+> forked from [Tutorial‑Codebase‑Knowledge](https://github.com/The-Pocket/PocketFlow-Tutorial-Codebase-Knowledge). MIT licensed.
 
-&nbsp;&nbsp;**🔸 🎉 Reached Hacker News Front Page** (April 2025) with >900 up‑votes:  [Discussion »](https://news.ycombinator.com/item?id=43739456)
+---
 
+## Features
 
+| Area | What it does |
+|------|--------------|
+| **Tutorial generation** | PocketFlow pipeline: crawl → identify abstractions → analyze relationships → order chapters → write chapters → combine (`main.py`). Multi‑language, LLM‑response caching. |
+| **Persistence** | Postgres + `pgvector` (works great on Supabase). Repositories, tutorials, chapters, chunks (+embeddings), ontology nodes/edges, fine‑tuning examples, RAG logs. |
+| **Hybrid RAG** | Semantic vector search when embeddings exist, transparent fallback to concept‑aware keyword scoring otherwise. Per‑repo tuning via `rag_config.py`. |
+| **Streaming chat** | Multi‑turn conversation over a tutorial's knowledge, per‑tutorial history, token‑by‑token streaming (Gemini & OpenAI‑compatible). |
+| **Ontology graph** | Extracts a concept graph (Mermaid + chapter order + markdown links) and renders it. |
+| **Repo‑wide delete** | `ON DELETE CASCADE` removes a repository and *all* its tutorials/chapters/chunks/embeddings/ontology/fine‑tuning/logs, with a pre‑delete count preview. |
+| **Fine‑tuning** | Export approved Q&A as JSONL and train a local LoRA adapter (`train_lora_local.py` / `infer_lora_local.py`). |
 
-## ⭐ Example Results for Popular GitHub Repositories!
+## Architecture
 
-<p align="center">
-    <img
-      src="./assets/example.png" width="600"
-    />
-</p>
+```
+Layer A — Generation pipeline (PocketFlow)
+  main.py → flow.py → nodes.py
+    FetchRepo → IdentifyAbstractions → AnalyzeRelationships
+              → OrderChapters → WriteChapters → CombineTutorial
+    utils/call_llm.py   (Gemini | OpenAI‑compatible, cache + streaming)
+    utils/crawl_*.py    (GitHub API / local files)
+  → writes output/<project>/index.md + NN_*.md
 
-🤯 All these tutorials are generated **entirely by AI** by crawling the GitHub repo!
+Layer B — Storage, RAG & app
+  db_store.py            (Postgres/pgvector: save, search, ontology, delete, fine‑tune)
+  rag_config.py          (per‑repo concept aliases / stop terms)
+  app_full_workflow.py   (Streamlit UI — 7 tabs)
+  backfill_embeddings.py (populate embeddings for existing chunks)
 
-- [AutoGen Core](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/AutoGen%20Core) - Build AI teams that talk, think, and solve problems together like coworkers!
+Layer C — Fine‑tuning (optional, GPU)
+  train_lora_local.py / infer_lora_local.py  (Qwen2.5 + PEFT LoRA)
+```
 
-- [Browser Use](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Browser%20Use) - Let AI surf the web for you, clicking buttons and filling forms like a digital assistant!
+## Requirements
 
-- [Celery](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Celery) - Supercharge your app with background tasks that run while you sleep!
+- Python 3.10+
+- A Postgres database with the `pgvector` extension (e.g. **Supabase**)
+- An LLM provider key: **Gemini** (`GEMINI_API_KEY`) and/or an **OpenAI‑compatible** endpoint
+- Optional: `OPENAI_API_KEY` for embeddings (enables semantic search) and a `GITHUB_TOKEN` (rate limits / private repos)
 
-- [Click](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Click) - Turn Python functions into slick command-line tools with just a decorator!
+## Getting Started
 
-- [Codex](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Codex) - Turn plain English into working code with this AI terminal wizard!
+### 1. Install
 
-- [Crawl4AI](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Crawl4AI) - Train your AI to extract exactly what matters from any website!
+```bash
+git clone https://github.com/xaikorea/GitHub-Analyzer.git
+cd GitHub-Analyzer
+pip install -r requirements.txt
+```
 
-- [CrewAI](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/CrewAI) - Assemble a dream team of AI specialists to tackle impossible problems!
+### 2. Configure
 
-- [DSPy](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/DSPy) - Build LLM apps like Lego blocks that optimize themselves!
+Copy `.env.sample` to `.env` and fill in your values (provider keys, `DATABASE_URL`, etc.).
+`.env*` files are gitignored except the sample.
 
-- [FastAPI](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/FastAPI) - Create APIs at lightning speed with automatic docs that clients will love!
+### 3. Initialize the database
 
-- [Flask](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Flask) - Craft web apps with minimal code that scales from prototype to production!
+```bash
+psql "$DATABASE_URL" -f schema.sql
+```
 
-- [Google A2A](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Google%20A2A) - The universal language that lets AI agents collaborate across borders!
+Idempotent (safe to re‑run): creates the `pgvector` extension, all tables, indexes,
+and `ON DELETE CASCADE` foreign keys.
 
-- [LangGraph](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/LangGraph) - Design AI agents as flowcharts where each step remembers what happened before!
+### 4a. Generate a tutorial from the CLI
 
-- [LevelDB](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/LevelDB) - Store data at warp speed with Google's engine that powers blockchains!
+```bash
+# GitHub repo
+python main.py --repo https://github.com/username/repo \
+  --include "*.py" "*.md" --exclude "tests/*" --max-size 60000 --language english
 
-- [MCP Python SDK](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/MCP%20Python%20SDK) - Build powerful apps that communicate through an elegant protocol without sweating the details!
+# Local directory
+python main.py --dir /path/to/codebase --include "*.py" --exclude "*test*"
+```
 
-- [NumPy Core](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/NumPy%20Core) - Master the engine behind data science that makes Python as fast as C!
+Key flags: `--repo`/`--dir` (required, exclusive), `-o/--output`, `-i/--include`, `-e/--exclude`,
+`-s/--max-size`, `--language`, `--max-abstractions`, `--no-cache`.
 
-- [OpenManus](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/OpenManus) - Build AI agents with digital brains that think, learn, and use tools just like humans do!
+### 4b. Or run the Streamlit app (recommended)
 
-- [PocketFlow](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/PocketFlow) - 100-line LLM framework. Let Agents build Agents!
+```bash
+streamlit run app_full_workflow.py
+```
 
-- [Pydantic Core](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Pydantic%20Core) - Validate data at rocket speed with just Python type hints!
+| Tab | Purpose |
+|-----|---------|
+| **Setup** | Verify provider / model / DB / token status. |
+| **Generate & Save** | Run `main.py` on a repo and save the result to the DB (auto‑builds the ontology). |
+| **Library** | Browse a saved tutorial: summary, flowchart, chapters. |
+| **RAG Search** | Ask a question; hybrid retrieval + optional LLM answer. |
+| **Chat** | Streaming multi‑turn conversation over the selected tutorial. |
+| **Ontology RAG** | Rebuild/inspect the concept graph and Mermaid diagram. |
+| **Admin** | Delete a single tutorial **or an entire repository** (all tutorials), with a count preview and optional local‑folder cleanup. |
 
-- [Requests](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/Requests) - Talk to the internet in Python with code so simple it feels like cheating!
+## Semantic Search & Embeddings
 
-- [SmolaAgents](https://the-pocket.github.io/PocketFlow-Tutorial-Codebase-Knowledge/SmolaAgents) - Build tiny AI agents that punch way above their weight class!
+By default, tutorials are saved **without** embeddings and search uses concept‑aware keyword scoring.
+To enable semantic (vector) search:
 
-- Showcase Your AI-Generated Tutorials in [Discussions](https://github.com/The-Pocket/PocketFlow-Tutorial-Codebase-Knowledge/discussions)!
+- Set `RAG_CREATE_EMBEDDINGS=1` (needs `OPENAI_API_KEY`) so new saves embed their chunks, **and/or**
+- Backfill existing chunks:
 
-## 🚀 Getting Started
+```bash
+python backfill_embeddings.py --dry-run   # report count & rough cost (no API calls)
+python backfill_embeddings.py             # embed all chunks (idempotent, resumable)
+```
 
-1. Clone this repository
-   ```bash
-   git clone https://github.com/The-Pocket/PocketFlow-Tutorial-Codebase-Knowledge
-   ```
+Once embeddings exist, `search_tutorial_context_v4` automatically prefers vector search
+and falls back to keyword scoring when they don't. Tune domain concepts in `rag_config.py`.
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Fine‑tuning (optional, GPU)
 
-4. Set up LLM in [`utils/call_llm.py`](./utils/call_llm.py) by providing credentials. To do so, you can put the values in a `.env` file. By default, you can use the AI Studio key with this client for Gemini Pro 2.5 by setting the `GEMINI_API_KEY` environment variable. If you want to use another LLM, you can set the `LLM_PROVIDER` environment variable (e.g. `XAI`), and then set the model, url, and API key (e.g. `XAI_MODEL`, `XAI_URL`,`XAI_API_KEY`). If using Ollama, the url is `http://localhost:11434/` and the API key can be omitted.
-   You can use your own models. We highly recommend the latest models with thinking capabilities (Claude 3.7 with thinking, O1). You can verify that it is correctly set up by running:
-   ```bash
-   python utils/call_llm.py
-   ```
+```bash
+pip install -r requirements-train.txt   # heavy (torch, transformers, peft, ...)
+python train_lora_local.py --train_jsonl exports/finetune_dataset.jsonl
+python infer_lora_local.py --adapter_dir finetuned_adapters/.../adapter --prompt "..." --language Korean
+```
 
-5. Generate a complete codebase tutorial by running the main script:
-    ```bash
-    # Analyze a GitHub repository
-    python main.py --repo https://github.com/username/repo --include "*.py" "*.js" --exclude "tests/*" --max-size 50000
+Training data (messages JSONL) is generated from stored chapters via the
+`create_finetune_examples_from_tutorial` / `export_finetune_jsonl` helpers in `db_store.py`.
 
-    # Or, analyze a local directory
-    python main.py --dir /path/to/your/codebase --include "*.py" --exclude "*test*"
+## Configuration reference
 
-    # Or, generate a tutorial in Chinese
-    python main.py --repo https://github.com/username/repo --language "Chinese"
-    ```
+| Variable | Purpose |
+|----------|---------|
+| `LLM_PROVIDER` | `GEMINI`, `OPENAI`, or any OpenAI‑compatible provider name |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Gemini via AI Studio (or `GEMINI_PROJECT_ID`/`GEMINI_LOCATION` for Vertex) |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | OpenAI‑compatible chat |
+| `OPENAI_EMBEDDING_MODEL` | Embedding model (default `text-embedding-3-small`, 1536‑dim) |
+| `DATABASE_URL` | Postgres/Supabase connection string |
+| `GITHUB_TOKEN` | Higher rate limits / private repos |
+| `RAG_CREATE_EMBEDDINGS` | `1` to embed chunks on save |
+| `MAX_ABSTRACTION_CONTEXT_CHARS` | Budget for the abstraction prompt on huge repos (default 900000) |
 
-    - `--repo` or `--dir` - Specify either a GitHub repo URL or a local directory path (required, mutually exclusive)
-    - `-n, --name` - Project name (optional, derived from URL/directory if omitted)
-    - `-t, --token` - GitHub token (or set GITHUB_TOKEN environment variable)
-    - `-o, --output` - Output directory (default: ./output)
-    - `-i, --include` - Files to include (e.g., "`*.py`" "`*.js`")
-    - `-e, --exclude` - Files to exclude (e.g., "`tests/*`" "`docs/*`")
-    - `-s, --max-size` - Maximum file size in bytes (default: 100KB)
-    - `--language` - Language for the generated tutorial (default: "english")
-    - `--max-abstractions` - Maximum number of abstractions to identify (default: 10)
-    - `--no-cache` - Disable LLM response caching (default: caching enabled)
+## Project layout
 
-The application will crawl the repository, analyze the codebase structure, generate tutorial content in the specified language, and save the output in the specified directory (default: ./output).
+```
+main.py, flow.py, nodes.py     PocketFlow generation pipeline
+utils/call_llm.py              LLM calls (cache + streaming)
+utils/crawl_*.py               GitHub / local crawlers
+db_store.py                    Postgres/pgvector: save, RAG, ontology, delete, fine‑tune
+rag_config.py                  per‑repo search tuning
+schema.sql                     database schema (pgvector, cascade)
+app_full_workflow.py           Streamlit app (7 tabs)
+backfill_embeddings.py         embedding backfill utility
+train_lora_local.py            LoRA training      infer_lora_local.py  LoRA inference
+requirements.txt               app deps           requirements-train.txt  training deps
+legacy/                        archived earlier Streamlit apps
+```
 
+## Credits
 
-<details>
- 
-<summary> 🐳 <b>Running with Docker</b> </summary>
-
-To run this project in a Docker container, you'll need to pass your API keys as environment variables. 
-
-1. Build the Docker image
-   ```bash
-   docker build -t pocketflow-app .
-   ```
-
-2. Run the container
-
-   You'll need to provide your `GEMINI_API_KEY` for the LLM to function. If you're analyzing private GitHub repositories or want to avoid rate limits, also provide your `GITHUB_TOKEN`.
-   
-   Mount a local directory to `/app/output` inside the container to access the generated tutorials on your host machine.
-   
-   **Example for analyzing a public GitHub repository:**
-   
-   ```bash
-   docker run -it --rm \
-     -e GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE" \
-     -v "$(pwd)/output_tutorials":/app/output \
-     pocketflow-app --repo https://github.com/username/repo
-   ```
-   
-   **Example for analyzing a local directory:**
-   
-   ```bash
-   docker run -it --rm \
-     -e GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE" \
-     -v "/path/to/your/local_codebase":/app/code_to_analyze \
-     -v "$(pwd)/output_tutorials":/app/output \
-     pocketflow-app --dir /app/code_to_analyze
-   ```
-</details>
-
-## 💡 Development Tutorial
-
-- I built using [**Agentic Coding**](https://zacharyhuang.substack.com/p/agentic-coding-the-most-fun-way-to), the fastest development paradigm, where humans simply [design](docs/design.md) and agents [code](flow.py).
-
-- The secret weapon is [Pocket Flow](https://github.com/The-Pocket/PocketFlow), a 100-line LLM framework that lets Agents (e.g., Cursor AI) build for you
-
-- Check out the Step-by-step YouTube development tutorial:
-
-<br>
-<div align="center">
-  <a href="https://youtu.be/AFY67zOpbSo" target="_blank">
-    <img src="./assets/youtube_thumbnail.png" width="500" alt="Pocket Flow Codebase Tutorial" style="cursor: pointer;">
-  </a>
-</div>
-<br>
-
-
-
+Built on [Pocket Flow](https://github.com/The-Pocket/PocketFlow) and forked from
+[The‑Pocket/PocketFlow‑Tutorial‑Codebase‑Knowledge](https://github.com/The-Pocket/PocketFlow-Tutorial-Codebase-Knowledge).
+Licensed under the MIT License — see [LICENSE](./LICENSE).
