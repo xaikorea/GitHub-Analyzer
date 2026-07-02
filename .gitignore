@@ -101,6 +101,16 @@ llm_cache.json
 # Output files
 output/
 
+# --- Project-specific additions ---
+# Provider-specific secret env files (keep only the sample tracked)
+.env.*
+!.env.sample
+# Streamlit / generation outputs and ML artifacts
+streamlit_output/
+output_*/
+exports/
+finetuned_adapters/
+
 # uv manage
 pyproject.toml
 uv.lock
