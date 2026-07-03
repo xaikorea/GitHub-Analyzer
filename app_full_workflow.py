@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from db_store import (
     save_tutorial_result_to_db,
+    describe_repo_url,
     list_tutorials,
     get_tutorial,
     get_chapters,
@@ -20,22 +21,137 @@ from db_store import (
     get_ontology_context_v3,
     build_rag_prompt_v3,
     build_chat_prompt_v4,
+    search_across_tutorials,
+    build_multi_repo_rag_prompt,
+    build_codegen_examples,
+    export_codegen_jsonl,
     delete_tutorial_v3,
     delete_repository_v4,
     count_related_v4,
     get_tutorial_repository,
     db_counts_v3,
 )
+from agent_rag import agent_gather, build_agent_answer_prompt
 
 load_dotenv(".env", override=True)
 
 st.set_page_config(
-    page_title="Codebase Tutorial Full Workflow",
+    page_title="GitHub Analyzer",
+    page_icon="🔍",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("Codebase Tutorial Full Workflow")
+# -----------------------------
+# Design system (CSS) + UI helpers
+# -----------------------------
 
+st.markdown(
+    """
+    <style>
+      :root {
+        --ga-accent: #7c5cff;
+        --ga-accent-2: #22d3ee;
+        --ga-ok: #3fb950;
+        --ga-warn: #d29922;
+        --ga-surface: #161b22;
+        --ga-border: #2a3038;
+        --ga-text-dim: #8b949e;
+      }
+      /* tighten default paddings for a denser, app-like feel */
+      .block-container { padding-top: 2.2rem; max-width: 1200px; }
+      /* Hero */
+      .ga-hero {
+        background: radial-gradient(1200px 200px at 0% 0%, rgba(124,92,255,.25), transparent 60%),
+                    linear-gradient(135deg, #1b2130 0%, #12161d 100%);
+        border: 1px solid var(--ga-border);
+        border-radius: 16px; padding: 22px 26px; margin-bottom: 18px;
+      }
+      .ga-hero-badge {
+        display: inline-block; font-weight: 700; font-size: 13px; letter-spacing:.3px;
+        color: #cbd5ff; background: rgba(124,92,255,.18);
+        border: 1px solid rgba(124,92,255,.45); padding: 4px 12px; border-radius: 999px;
+      }
+      .ga-hero-title { font-size: 27px; font-weight: 800; margin: 12px 0 4px; color:#f0f3f8; }
+      .ga-hero-sub { color: var(--ga-text-dim); font-size: 14.5px; }
+      /* Section header */
+      .ga-section-title { font-size: 21px; font-weight: 750; color:#f0f3f8; display:flex; gap:8px; align-items:center; }
+      .ga-section-sub { color: var(--ga-text-dim); font-size: 13.5px; margin: 2px 0 14px; }
+      /* Status chips */
+      .ga-chip { display:inline-flex; align-items:center; gap:6px; font-size:12.5px;
+        padding:4px 11px; border-radius:999px; margin:3px 6px 3px 0; border:1px solid var(--ga-border);
+        background: var(--ga-surface); color:#c9d1d9; }
+      .ga-chip b { color:#fff; font-weight:650; }
+      .ga-chip--ok { border-color: rgba(63,185,80,.5); background: rgba(63,185,80,.12); }
+      .ga-chip--warn { border-color: rgba(210,153,34,.5); background: rgba(210,153,34,.12); }
+      .ga-chip .dot { width:7px; height:7px; border-radius:50%; }
+      .ga-chip--ok .dot { background: var(--ga-ok); }
+      .ga-chip--warn .dot { background: var(--ga-warn); }
+      /* Empty state */
+      .ga-empty { text-align:center; padding: 40px 20px; border:1px dashed var(--ga-border);
+        border-radius:14px; background: rgba(255,255,255,.02); margin: 8px 0; }
+      .ga-empty-icon { font-size: 34px; }
+      .ga-empty-title { font-weight:700; font-size:16px; margin-top:8px; color:#e6edf3; }
+      .ga-empty-hint { color: var(--ga-text-dim); font-size:13.5px; margin-top:4px; }
+      /* Tabs -> segmented control look */
+      .stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid var(--ga-border); }
+      .stTabs [data-baseweb="tab"] { height: 40px; border-radius: 9px 9px 0 0; padding: 0 14px; font-weight: 600; }
+      .stTabs [aria-selected="true"] { background: rgba(124,92,255,.14); color:#fff; }
+      /* Buttons */
+      .stButton>button { border-radius: 10px; font-weight: 650; border:1px solid var(--ga-border); }
+      .stButton>button[kind="primary"] { background: var(--ga-accent); border-color: var(--ga-accent); }
+      .stButton>button[kind="primary"]:hover { filter: brightness(1.08); }
+      /* Cards: expanders & metrics */
+      [data-testid="stExpander"] { border:1px solid var(--ga-border); border-radius:12px; background: rgba(255,255,255,.015); }
+      [data-testid="stMetric"] { background: var(--ga-surface); border:1px solid var(--ga-border);
+        border-radius:12px; padding:12px 14px; }
+      /* Sidebar */
+      [data-testid="stSidebar"] { border-right:1px solid var(--ga-border); }
+      .ga-side-brand { font-weight:800; font-size:18px; color:#f0f3f8; display:flex; gap:8px; align-items:center; }
+      .ga-side-label { text-transform:uppercase; letter-spacing:.6px; font-size:11px;
+        color: var(--ga-text-dim); font-weight:700; margin:6px 0 2px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def section_header(title: str, subtitle: str = "", icon: str = ""):
+    sub = f'<div class="ga-section-sub">{subtitle}</div>' if subtitle else ""
+    st.markdown(
+        f'<div class="ga-section-title">{icon} {title}</div>{sub}',
+        unsafe_allow_html=True,
+    )
+
+
+def status_chip(label: str, value: str, ok: bool = True) -> str:
+    cls = "ga-chip ga-chip--ok" if ok else "ga-chip ga-chip--warn"
+    return f'<span class="{cls}"><span class="dot"></span><b>{label}</b> {value}</span>'
+
+
+def render_chips(chips: list[str]):
+    st.markdown("".join(chips), unsafe_allow_html=True)
+
+
+def empty_state(title: str, hint: str = "", icon: str = "📭"):
+    st.markdown(
+        f'<div class="ga-empty"><div class="ga-empty-icon">{icon}</div>'
+        f'<div class="ga-empty-title">{title}</div>'
+        f'<div class="ga-empty-hint">{hint}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+st.markdown(
+    """
+    <div class="ga-hero">
+      <span class="ga-hero-badge">🔍 GitHub Analyzer</span>
+      <div class="ga-hero-title">코드베이스를 검색·대화 가능한 지식으로</div>
+      <div class="ga-hero-sub">AI 튜토리얼 생성 · Postgres/pgvector RAG · 스트리밍 챗 · 온톨로지 그래프</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def split_patterns(value: str) -> list[str]:
@@ -146,7 +262,9 @@ def get_tutorials_safe():
 # sidebar setup
 # -----------------------------
 
-st.sidebar.header("1. 초기 세팅")
+st.sidebar.markdown('<div class="ga-side-brand">🔍 GitHub Analyzer</div>', unsafe_allow_html=True)
+st.sidebar.caption("codebase → searchable knowledge base")
+st.sidebar.markdown('<div class="ga-side-label">① LLM & 연결 설정</div>', unsafe_allow_html=True)
 
 provider = st.sidebar.selectbox(
     "LLM Provider",
@@ -211,8 +329,17 @@ if st.sidebar.button("현재 세션에 설정 적용", type="primary"):
 
 set_env_from_ui(provider, api_key, model_name, github_token, database_url)
 
+# Live connection status chips
+with st.sidebar:
+    st.markdown('<div class="ga-side-label">연결 상태</div>', unsafe_allow_html=True)
+    render_chips([
+        status_chip("Provider", os.getenv("LLM_PROVIDER", "—") or "—", ok=bool(os.getenv("LLM_PROVIDER"))),
+        status_chip("Key", "OK" if api_key else "없음", ok=bool(api_key)),
+        status_chip("DB", "연결됨" if os.getenv("DATABASE_URL") else "미설정", ok=bool(os.getenv("DATABASE_URL"))),
+    ])
+
 st.sidebar.divider()
-st.sidebar.header("2. 저장된 튜토리얼")
+st.sidebar.markdown('<div class="ga-side-label">② 저장된 튜토리얼</div>', unsafe_allow_html=True)
 
 tutorials = get_tutorials_safe()
 
@@ -221,20 +348,28 @@ if tutorials:
     selected_tutorial = st.sidebar.selectbox(
         "튜토리얼 선택",
         tutorials,
-        format_func=lambda x: f"{x['title']} | {x['source_repo_url']}",
+        format_func=lambda x: f"📘 {x['title'].replace('Tutorial: ', '')} · {x.get('language', '')}",
     )
+    if selected_tutorial:
+        st.sidebar.caption(f"🔗 {selected_tutorial['source_repo_url']}")
 else:
-    st.sidebar.info("아직 DB에 저장된 튜토리얼이 없습니다.")
+    st.sidebar.info("아직 저장된 튜토리얼이 없습니다.\n\n**➕ Generate** 탭에서 첫 저장소를 분석해 보세요.")
 
 
-tab_setup, tab_generate, tab_library, tab_rag, tab_chat, tab_ontology, tab_admin = st.tabs([
-    "Setup",
-    "Generate & Save",
-    "Library",
-    "RAG Search",
-    "Chat",
-    "Ontology RAG",
-    "Admin",
+(
+    tab_setup, tab_generate, tab_library, tab_rag, tab_chat,
+    tab_multirag, tab_agent, tab_ontology, tab_finetune, tab_admin,
+) = st.tabs([
+    "⚙️ Setup",
+    "➕ Generate",
+    "📚 Library",
+    "🔎 RAG Search",
+    "💬 Chat",
+    "🔗 Multi-Repo RAG",
+    "🤖 Agent",
+    "🕸 Ontology",
+    "🛠 Fine-tune",
+    "🗑 Admin",
 ])
 
 
@@ -243,20 +378,30 @@ tab_setup, tab_generate, tab_library, tab_rag, tab_chat, tab_ontology, tab_admin
 # -----------------------------
 
 with tab_setup:
-    st.header("Setup 상태 확인")
+    section_header(
+        "환경 상태",
+        "LLM · 임베딩 · 데이터베이스 · GitHub 토큰 연결 상태를 한눈에 확인합니다.",
+        icon="⚙️",
+    )
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Provider", os.getenv("LLM_PROVIDER", ""))
-    col2.metric("Model", model_name)
-    col3.metric("DB URL", "SET" if os.getenv("DATABASE_URL") else "MISSING")
+    col1.metric("Provider", os.getenv("LLM_PROVIDER", "—") or "—")
+    col2.metric("Model", model_name or "—")
+    col3.metric("Database", "연결됨" if os.getenv("DATABASE_URL") else "미설정")
 
-    st.write("GitHub Token:", "SET" if os.getenv("GITHUB_TOKEN") else "EMPTY")
-    st.write(api_key_label + ":", "SET" if api_key else "MISSING")
+    render_chips([
+        status_chip(api_key_label.replace("_API_KEY", " Key"), "OK" if api_key else "없음", ok=bool(api_key)),
+        status_chip("Embeddings", "가능" if os.getenv("OPENAI_API_KEY") else "키 없음", ok=bool(os.getenv("OPENAI_API_KEY"))),
+        status_chip("GitHub Token", "설정됨" if os.getenv("GITHUB_TOKEN") else "없음", ok=bool(os.getenv("GITHUB_TOKEN"))),
+        status_chip("DB", "연결됨" if os.getenv("DATABASE_URL") else "미설정", ok=bool(os.getenv("DATABASE_URL"))),
+    ])
 
     st.info(
-        "이 탭에서 API Key, GitHub Token, Database URL 상태를 확인합니다. "
-        "실제 repo 분석은 Generate & Save 탭에서 진행합니다."
+        "왼쪽 사이드바에서 Provider·Key·DB를 설정합니다. "
+        "실제 저장소 분석은 **➕ Generate** 탭에서 진행합니다."
     )
+    if not os.getenv("OPENAI_API_KEY"):
+        st.caption("💡 OpenAI 키가 없으면 RAG는 키워드 검색으로 동작합니다. 키를 넣으면 의미 기반(시맨틱) 검색이 활성화됩니다.")
 
 
 # -----------------------------
@@ -264,12 +409,75 @@ with tab_setup:
 # -----------------------------
 
 with tab_generate:
-    st.header("Generate & Save")
+    section_header(
+        "저장소 분석 & 저장",
+        "GitHub 저장소를 분석해 튜토리얼을 만들고 DB에 저장합니다. 아래에서 URL 구조를 먼저 확인하세요.",
+        icon="➕",
+    )
 
     repo_url = st.text_input(
         "GitHub Repository URL",
         value="https://github.com/fastapi/fastapi/tree/master/fastapi",
     )
+
+    # --- Explain the URL structure and what will actually be analyzed ---
+    _parsed = describe_repo_url(repo_url)
+    with st.expander("🔎 이 URL은 어떻게 해석되나요? (분석 범위 · Library/시각화/RAG 연결)", expanded=True):
+        if not _parsed["valid"]:
+            st.warning(
+                "GitHub 저장소 URL 형식이 아닙니다.\n\n"
+                "- 전체 저장소: `https://github.com/owner/repo`\n"
+                "- 특정 브랜치: `https://github.com/owner/repo/tree/main`\n"
+                "- 하위 폴더만: `https://github.com/owner/repo/tree/main/src/pkg`"
+            )
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Owner", _parsed["owner"])
+            c2.metric("Repository", _parsed["repo"])
+            c3.metric("Branch/Ref", _parsed["ref"] or "기본 브랜치")
+            scope_label = {
+                "whole_repo": "전체 저장소",
+                "subdirectory": "하위 폴더만",
+                "single_file": "단일 파일",
+            }[_parsed["scope"]]
+            c4.metric("분석 범위", scope_label)
+
+            st.caption(f"정규화된 URL: `{_parsed['canonical_url']}`")
+            if _parsed["sub_path"]:
+                st.caption(f"하위 경로(sub_path): `{_parsed['sub_path']}`")
+
+            # Scope-specific guidance
+            if _parsed["scope"] == "single_file":
+                st.error(
+                    "`/blob/` URL은 **단일 파일**을 가리킵니다. 코드베이스 분석에는 부적합합니다. "
+                    "`/blob/`를 `/tree/`로 바꾸거나, 폴더/저장소 URL을 사용하세요."
+                )
+            elif _parsed["scope"] == "subdirectory":
+                st.info(
+                    f"이 URL은 **`{_parsed['sub_path']}` 폴더만** 분석합니다. "
+                    "저장소 전체를 분석하려면 `/tree/<branch>/...` 부분을 지우고 "
+                    f"`https://github.com/{_parsed['repo_name']}` 형태로 입력하세요."
+                )
+            else:
+                st.info(
+                    "이 URL은 **저장소 전체**를 분석합니다. 규모가 크면 아래 "
+                    "include/exclude 패턴과 max-size로 범위를 좁히거나, "
+                    "특정 폴더 URL(`/tree/<branch>/<폴더>`)로 지정하면 결과가 더 정확해집니다."
+                )
+
+            st.markdown(
+                "**입력한 범위가 이후 단계로 이어지는 방식**\n\n"
+                "1. **크롤링** — 위 범위(브랜치/하위 폴더) 안에서 include에 맞고 exclude에 안 걸리는 "
+                "파일만 수집합니다. (`--repo` 로 URL이 그대로 전달되어 `tree/branch/subpath`가 해석됩니다.)\n"
+                "2. **Library** — 수집된 코드로 핵심 추상화를 뽑아 `index.md`(요약 + Mermaid) 와 챕터를 만듭니다. "
+                "즉 여기 범위에 **없는 파일은 챕터/설명에 나타나지 않습니다.**\n"
+                "3. **시각화(Ontology)** — 추상화(노드)와 관계(엣지)를 Mermaid + 챕터 링크에서 추출합니다. "
+                "범위가 좁고 응집적일수록 그래프가 깔끔합니다.\n"
+                "4. **RAG / Chat** — 각 챕터가 청크로 분할·(임베딩 시)벡터화되어 검색됩니다. "
+                "따라서 **RAG로 답하게 하고 싶은 부분**이 있으면 그 파일이 include에 포함되고 이 범위 안에 있어야 합니다.\n\n"
+                "**참조 팁**: 소스 + 문서를 함께 넣으면(`*.py *.md`) 설명 품질이 올라가고, "
+                "`tests/*`·`build/*`·`docs_src/*` 등은 제외하는 것이 좋습니다."
+            )
 
     col_a, col_b = st.columns(2)
 
@@ -341,8 +549,19 @@ with tab_generate:
 
         before = time.time()
 
+        # Force the child process to emit UTF-8 on stdout. On Korean Windows
+        # the child's default console encoding is cp949, so printing a file
+        # path or log line containing CJK/emoji characters would raise
+        # UnicodeEncodeError and abort the whole crawl. We read stdout as
+        # UTF-8 below, so make the child write UTF-8 too.
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONUNBUFFERED"] = "1"
+
         process = subprocess.Popen(
             cmd,
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -410,10 +629,10 @@ with tab_generate:
 # -----------------------------
 
 with tab_library:
-    st.header("Library")
+    section_header("라이브러리", "생성된 튜토리얼의 요약 · 플로우차트 · 챕터를 열람합니다.", icon="📚")
 
     if not selected_tutorial:
-        st.info("저장된 튜토리얼이 없습니다. Generate & Save 탭에서 먼저 생성하세요.")
+        empty_state("아직 튜토리얼이 없습니다", "➕ Generate 탭에서 첫 저장소를 분석해 보세요.", icon="📚")
     else:
         tutorial_id = selected_tutorial["id"]
         tutorial = get_tutorial(tutorial_id)
@@ -453,10 +672,10 @@ with tab_library:
 # -----------------------------
 
 with tab_rag:
-    st.header("RAG Search")
+    section_header("RAG 검색", "질문과 관련된 코드/설명을 하이브리드(벡터+키워드) 검색으로 찾고, 근거 기반 답변을 생성합니다.", icon="🔎")
 
     if not selected_tutorial:
-        st.info("저장된 튜토리얼이 없습니다.")
+        empty_state("아직 튜토리얼이 없습니다", "➕ Generate 탭에서 저장소를 분석해 저장한 뒤 이용하세요.", icon="📭")
     else:
         tutorial_id = selected_tutorial["id"]
 
@@ -533,10 +752,10 @@ with tab_rag:
 # -----------------------------
 
 with tab_chat:
-    st.header("Chat")
+    section_header("챗", "선택한 튜토리얼 지식으로 멀티턴 대화를 나눕니다. 답변은 실시간 스트리밍됩니다.", icon="💬")
 
     if not selected_tutorial:
-        st.info("저장된 튜토리얼이 없습니다. Generate & Save 탭에서 먼저 생성하세요.")
+        empty_state("아직 튜토리얼이 없습니다", "➕ Generate 탭에서 첫 저장소를 분석해 보세요.", icon="📚")
     else:
         tutorial_id = selected_tutorial["id"]
         chat_lang = selected_tutorial.get("language") or "Korean"
@@ -615,10 +834,10 @@ with tab_chat:
 # -----------------------------
 
 with tab_ontology:
-    st.header("Ontology RAG")
+    section_header("온톨로지", "코드베이스의 핵심 개념(노드)과 관계(엣지)를 그래프로 추출·시각화합니다.", icon="🕸")
 
     if not selected_tutorial:
-        st.info("저장된 튜토리얼이 없습니다.")
+        empty_state("아직 튜토리얼이 없습니다", "➕ Generate 탭에서 저장소를 분석해 저장한 뒤 이용하세요.", icon="📭")
     else:
         tutorial_id = selected_tutorial["id"]
 
@@ -696,7 +915,7 @@ def _render_counts(counts):
 
 
 with tab_admin:
-    st.header("Admin / Delete")
+    section_header("관리 · 삭제", "튜토리얼 또는 레포지토리 전체를 관련 데이터까지 안전하게 삭제합니다.", icon="🗑")
 
     # Show a one-time summary after a delete triggered a rerun.
     _summary = st.session_state.pop("last_delete_summary", None)
@@ -707,7 +926,7 @@ with tab_admin:
             st.caption(line)
 
     if not selected_tutorial:
-        st.info("삭제할 튜토리얼이 없습니다.")
+        empty_state("삭제할 항목이 없습니다", "저장된 튜토리얼이 있어야 삭제할 수 있습니다.", icon="🗑")
     else:
         tutorial_id = selected_tutorial["id"]
         tutorial = get_tutorial(tutorial_id)
@@ -774,3 +993,243 @@ with tab_admin:
                 "local": local_lines,
             }
             st.rerun()
+
+
+# -----------------------------
+# Multi-Repo RAG tab
+# -----------------------------
+
+with tab_multirag:
+    section_header(
+        "멀티-레포 RAG",
+        "여러 저장소를 함께 검색해 공통점·차이·연결 인사이트를 얻습니다.",
+        icon="🔗",
+    )
+
+    if not tutorials:
+        empty_state("저장된 저장소가 없습니다", "➕ Generate 탭에서 저장소 2개 이상을 저장하면 교차 검색이 가능합니다.", icon="🔗")
+    else:
+        picked = st.multiselect(
+            "검색할 저장소(튜토리얼) 선택",
+            options=tutorials,
+            default=tutorials[: min(3, len(tutorials))],
+            format_func=lambda x: f"{x['title'].replace('Tutorial: ', '')} · {x['source_repo_url']}",
+        )
+        mr_query = st.text_area("질문", value="이 저장소들의 공통 아키텍처 패턴과 차이는?", height=90)
+
+        cc1, cc2, cc3 = st.columns([1, 1, 1])
+        mr_top_k = cc1.slider("총 결과 수", 3, 20, 8, key="mr_top_k")
+        mr_per_repo = cc2.slider("저장소당 후보", 2, 10, 5, key="mr_per_repo")
+        with cc3:
+            st.write("")
+            mr_go = st.button("교차 검색 + 합성 답변", type="primary", key="mr_go")
+
+        if len(picked) < 2:
+            st.caption("💡 저장소를 2개 이상 선택하면 '저장소 간 연결' 인사이트가 유의미해집니다. (1개도 검색은 가능)")
+
+        if mr_go:
+            ids = [t["id"] for t in picked]
+            if not ids:
+                st.warning("저장소를 1개 이상 선택하세요.")
+            else:
+                with st.spinner("여러 저장소를 교차 검색 중..."):
+                    mr_results = search_across_tutorials(ids, mr_query, top_k=mr_top_k, per_repo_top=mr_per_repo)
+                st.session_state["mrag"] = {"results": mr_results, "q": mr_query}
+
+        mr_data = st.session_state.get("mrag")
+        if mr_data and mr_data["results"]:
+            results = mr_data["results"]
+            per_repo_count = {}
+            for r in results:
+                per_repo_count[r["tutorial_title"]] = per_repo_count.get(r["tutorial_title"], 0) + 1
+
+            render_chips([
+                status_chip(title.replace("Tutorial: ", ""), f"{n} hit")
+                for title, n in per_repo_count.items()
+            ])
+
+            st.markdown("#### 검색 결과 (저장소별)")
+            for title, n in per_repo_count.items():
+                with st.expander(f"📘 {title.replace('Tutorial: ', '')} · {n}건"):
+                    for r in [x for x in results if x["tutorial_title"] == title]:
+                        st.caption(f"norm={r['norm_score']} · raw={r['score']} · Ch{r['chapter_no']} {r['chapter_title']}")
+                        st.write((r["content"] or "")[:700])
+
+            st.markdown("#### 합성 답변")
+            mr_prompt = build_multi_repo_rag_prompt(mr_data["q"], results, language="Korean")
+            try:
+                from utils.call_llm import call_llm_stream
+
+                st.write_stream(call_llm_stream(mr_prompt))
+            except Exception as e:
+                st.error("답변 생성 실패")
+                st.exception(e)
+        elif mr_data:
+            st.warning("검색 결과가 없습니다. 질문 키워드를 바꾸거나 저장소를 더 선택해 보세요.")
+
+
+# -----------------------------
+# Fine-tune tab
+# -----------------------------
+
+with tab_finetune:
+    section_header(
+        "파인튜닝 (코드 생성)",
+        "저장한 여러 레포의 실제 코드 블록으로 소형 LoRA 학습 데이터셋을 만들고, 로컬 GPU(4GB)에서 학습합니다.",
+        icon="🛠",
+    )
+
+    if not tutorials:
+        empty_state("저장된 저장소가 없습니다", "➕ Generate에서 코드가 풍부한 저장소를 저장하세요.", icon="🛠")
+    else:
+        ft_picked = st.multiselect(
+            "데이터셋에 포함할 저장소",
+            options=tutorials,
+            default=tutorials,
+            format_func=lambda x: f"{x['title'].replace('Tutorial: ', '')} · {x['source_repo_url']}",
+            key="ft_pick",
+        )
+        fc1, fc2 = st.columns(2)
+        ft_min_lines = fc1.slider("코드 블록 최소 줄 수", 2, 15, 3, key="ft_min")
+        ft_max_per = fc2.number_input("저장소당 최대 예시 (0=제한 없음)", min_value=0, max_value=5000, value=0, step=50, key="ft_max")
+
+        if st.button("코드젠 데이터셋 생성 (JSONL)", type="primary", key="ft_build"):
+            ids = [t["id"] for t in ft_picked]
+            if not ids:
+                st.warning("저장소를 1개 이상 선택하세요.")
+            else:
+                with st.spinner("코드 블록 추출 및 JSONL 생성 중..."):
+                    stats = export_codegen_jsonl(
+                        ids,
+                        out_path="exports/codegen_dataset.jsonl",
+                        min_code_lines=ft_min_lines,
+                        max_per_tutorial=(ft_max_per or None),
+                    )
+                st.session_state["codegen_stats"] = stats
+
+        stats = st.session_state.get("codegen_stats")
+        if stats:
+            mm1, mm2 = st.columns(2)
+            mm1.metric("생성된 예시", stats["examples"])
+            mm2.metric("저장소 수", stats["tutorials"])
+            if stats["by_language"]:
+                render_chips([status_chip(lang or "code", str(n)) for lang, n in stats["by_language"].items()])
+            st.success(f"데이터셋 저장됨: `{stats['path']}`")
+
+            if stats["examples"] < 20:
+                st.warning(
+                    "예시가 적습니다. 코드가 풍부한 소스 폴더를 저장하면(예: `/tree/main/src`) "
+                    "더 좋은 데이터셋이 됩니다. HTML/YAML 위주면 문서 저장소일 수 있습니다."
+                )
+
+            st.markdown("#### 1) 학습 (RTX 3050Ti · 4GB VRAM — 4-bit QLoRA)")
+            st.code(
+                "pip install -r requirements-train.txt\n"
+                f"python train_lora_local.py --train_jsonl {stats['path']} \\\n"
+                "  --load_4bit --model_name Qwen/Qwen2.5-0.5B-Instruct \\\n"
+                "  --out_dir finetuned_adapters/codegen_qwen05 \\\n"
+                "  --max_length 640 --epochs 2 --batch_size 1 --grad_accum 16",
+                language="bash",
+            )
+            st.markdown("#### 2) 학습된 어댑터로 코드 생성")
+            st.code(
+                'python infer_codegen_local.py \\\n'
+                '  --adapter_dir finetuned_adapters/codegen_qwen05/adapter \\\n'
+                '  --prompt "FastAPI 의존성 주입을 사용하는 엔드포인트 예시를 작성해줘"',
+                language="bash",
+            )
+            st.caption(
+                "4GB 가이드: 4-bit(QLoRA) + Qwen2.5-0.5B + max_length≤640 + grad checkpointing 권장. "
+                "1.5B는 학습 시 OOM 위험이 큽니다. 함수/구조 등 작은 단위 위주로 데이터를 구성하세요."
+            )
+        else:
+            st.info("저장소를 선택하고 **코드젠 데이터셋 생성**을 누르면, 학습용 JSONL과 4GB용 학습/추론 명령이 표시됩니다.")
+
+
+# -----------------------------
+# Agent (Agentic RAG) tab
+# -----------------------------
+
+_AGENT_TOOL_ICON = {
+    "search": "🔎", "list_chapters": "📖", "read_chapter": "📄",
+    "ontology": "🕸", "finish": "✅",
+}
+
+with tab_agent:
+    section_header(
+        "에이전트 RAG",
+        "질문을 주면 에이전트가 스스로 도구(검색·챕터 읽기·온톨로지)를 골라 반복 탐색한 뒤 근거 기반으로 답합니다.",
+        icon="🤖",
+    )
+
+    if not tutorials:
+        empty_state("저장된 저장소가 없습니다", "➕ Generate에서 저장소를 저장하면 에이전트가 탐색할 수 있습니다.", icon="🤖")
+    else:
+        ag_picked = st.multiselect(
+            "대상 저장소 (여러 개 선택 시 교차 탐색)",
+            options=tutorials,
+            default=tutorials[: min(2, len(tutorials))],
+            format_func=lambda x: f"{x['title'].replace('Tutorial: ', '')} · {x['source_repo_url']}",
+            key="ag_pick",
+        )
+        ag_q = st.text_area(
+            "질문",
+            value="이 저장소들의 핵심 구성요소와 관계, 그리고 서로 어떻게 연결될 수 있는지 설명해줘.",
+            height=90,
+            key="ag_q",
+        )
+        agc1, agc2 = st.columns([1, 3])
+        ag_steps = agc1.slider("최대 스텝(도구 호출 수)", 2, 10, 6, key="ag_steps")
+        with agc2:
+            st.write("")
+            ag_go = st.button("🤖 에이전트 실행", type="primary", key="ag_go")
+
+        st.caption("에이전트는 매 스텝 도구를 선택→실행→관측하며, 잘못된 액션은 스스로 교정하고, 스텝 예산 안에서 탐색을 마칩니다.")
+
+        if ag_go:
+            ids = [t["id"] for t in ag_picked]
+            if not ids:
+                st.warning("저장소를 1개 이상 선택하세요.")
+            else:
+                with st.spinner("에이전트가 도구로 코드베이스를 탐색 중..."):
+                    ag_res = agent_gather(ids, ag_q, max_steps=ag_steps)
+                ag_lang = (ag_picked[0].get("language") if ag_picked else "Korean") or "Korean"
+                st.session_state["agent_run"] = {"res": ag_res, "q": ag_q, "lang": ag_lang}
+
+        agent_data = st.session_state.get("agent_run")
+        if agent_data:
+            res = agent_data["res"]
+            render_chips([
+                status_chip("스텝", str(res["steps"])),
+                status_chip("종료", "finish" if res["finished"] else "예산 소진", ok=res["finished"]),
+                status_chip("도구 호출", str(len([s for s in res["trace"] if s.get("tool")]))),
+            ])
+
+            st.markdown("#### 🧭 에이전트 트레이스")
+            for s in res["trace"]:
+                if s.get("error"):
+                    st.warning(f"Step {s['step']}: 유효하지 않은 액션 → 자기 교정")
+                    continue
+                tool = s.get("tool")
+                icon = _AGENT_TOOL_ICON.get(tool, "🔧")
+                arg_str = ", ".join(f"{k}={v}" for k, v in (s.get("args") or {}).items())
+                with st.expander(f"{icon} Step {s['step']} · {tool}({arg_str})"):
+                    if s.get("thought"):
+                        st.caption(f"💭 {s['thought']}")
+                    if s.get("observation"):
+                        st.code((s["observation"])[:1200], language="text")
+
+            st.markdown("#### 🧠 최종 답변")
+            ans_prompt = build_agent_answer_prompt(
+                agent_data["q"], res["transcript"], language=agent_data.get("lang", "Korean")
+            )
+            if not res["transcript"].strip():
+                st.warning("근거를 수집하지 못했습니다. 질문을 바꾸거나 스텝 수를 늘려보세요.")
+            else:
+                try:
+                    from utils.call_llm import call_llm_stream
+
+                    st.write_stream(call_llm_stream(ans_prompt))
+                except Exception as e:
+                    st.error("답변 생성 실패")
+                    st.exception(e)
