@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>Turn any GitHub repository into a searchable, chat‑able knowledge base.</b><br>
-  AI‑generated codebase tutorials · Postgres/pgvector RAG · streaming chat · ontology graph · LoRA fine‑tuning.
+  AI tutorials · pgvector RAG · streaming chat · multi‑repo RAG · agentic RAG · ontology graph · code‑gen LoRA.
 </p>
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
@@ -14,12 +14,14 @@
 GitHub Analyzer는 공개/로컬 코드베이스를 크롤링해 **초보자용 튜토리얼**을 자동 생성하고, 그 결과를
 **Supabase(Postgres + pgvector)** 에 저장한 뒤 **Streamlit 앱**에서 검색·대화·시각화할 수 있게 해줍니다.
 
-- **Generate & Save** — GitHub repo → 튜토리얼(챕터 + Mermaid 다이어그램) 생성 후 DB 저장
+- **Generate & Save** — GitHub repo → 튜토리얼(챕터 + Mermaid) 생성 후 DB 저장. 입력 URL 구조(전체/브랜치/하위폴더)를 자동 분석·설명
 - **RAG Search** — 하이브리드(벡터 + 키워드) 검색으로 질문에 근거 있는 답변
 - **Chat** — 저장된 코드베이스 지식으로 멀티턴 스트리밍 대화
-- **Ontology RAG** — Mermaid/챕터/링크에서 추출한 개념 그래프
+- **Multi‑Repo RAG** — 여러 저장소를 함께 검색해 공통점·차이·연결 인사이트 종합
+- **Agent** — 에이전트가 스스로 도구(검색·챕터읽기·온톨로지)를 골라 반복 탐색 후 답변(ReAct 하네스)
+- **Ontology** — Mermaid/챕터/링크에서 추출한 개념 그래프
+- **Fine‑tune** — 여러 레포의 코드 블록으로 코드생성 데이터셋 → 4GB GPU용 QLoRA 학습
 - **Admin** — 튜토리얼 또는 **레포지토리 전체**를 관련 데이터까지 한 번에 삭제
-- **Fine‑tuning** — 생성된 튜토리얼로 로컬 LoRA 학습(선택)
 
 > Built on [Pocket Flow](https://github.com/The-Pocket/PocketFlow), the 100‑line LLM framework, and originally
 > forked from [Tutorial‑Codebase‑Knowledge](https://github.com/The-Pocket/PocketFlow-Tutorial-Codebase-Knowledge). MIT licensed.
@@ -33,10 +35,12 @@ GitHub Analyzer는 공개/로컬 코드베이스를 크롤링해 **초보자용 
 | **Tutorial generation** | PocketFlow pipeline: crawl → identify abstractions → analyze relationships → order chapters → write chapters → combine (`main.py`). Multi‑language, LLM‑response caching. |
 | **Persistence** | Postgres + `pgvector` (works great on Supabase). Repositories, tutorials, chapters, chunks (+embeddings), ontology nodes/edges, fine‑tuning examples, RAG logs. |
 | **Hybrid RAG** | Semantic vector search when embeddings exist, transparent fallback to concept‑aware keyword scoring otherwise. Per‑repo tuning via `rag_config.py`. |
+| **Multi‑repo RAG** | Search several saved repos at once with fair per‑repo score normalization, then synthesize/compare across them (`search_across_tutorials`). |
+| **Agentic RAG** | A ReAct agent (`agent_rag.py`) picks tools (search / read_chapter / ontology / finish) and iterates, with strict JSON actions, self‑correction, a step budget, and a visible trace. |
 | **Streaming chat** | Multi‑turn conversation over a tutorial's knowledge, per‑tutorial history, token‑by‑token streaming (Gemini & OpenAI‑compatible). |
 | **Ontology graph** | Extracts a concept graph (Mermaid + chapter order + markdown links) and renders it. |
 | **Repo‑wide delete** | `ON DELETE CASCADE` removes a repository and *all* its tutorials/chapters/chunks/embeddings/ontology/fine‑tuning/logs, with a pre‑delete count preview. |
-| **Fine‑tuning** | Export approved Q&A as JSONL and train a local LoRA adapter (`train_lora_local.py` / `infer_lora_local.py`). |
+| **Code‑gen fine‑tuning** | Turn real code blocks from stored repos into an (instruction → code) JSONL and train a 4‑bit QLoRA adapter that fits ≤4GB VRAM (`train_lora_local.py --load_4bit`, `infer_codegen_local.py`). |
 
 ## Architecture
 
@@ -50,13 +54,15 @@ Layer A — Generation pipeline (PocketFlow)
   → writes output/<project>/index.md + NN_*.md
 
 Layer B — Storage, RAG & app
-  db_store.py            (Postgres/pgvector: save, search, ontology, delete, fine‑tune)
+  db_store.py            (Postgres/pgvector: save, search, cross-repo, ontology, delete, datasets)
+  agent_rag.py           (agentic RAG: ReAct tool loop over the stored repos)
   rag_config.py          (per‑repo concept aliases / stop terms)
-  app_full_workflow.py   (Streamlit UI — 7 tabs)
+  app_full_workflow.py   (Streamlit UI — 10 tabs)
   backfill_embeddings.py (populate embeddings for existing chunks)
 
 Layer C — Fine‑tuning (optional, GPU)
-  train_lora_local.py / infer_lora_local.py  (Qwen2.5 + PEFT LoRA)
+  train_lora_local.py    (LoRA / 4‑bit QLoRA, --load_4bit for ≤4GB VRAM)
+  infer_lora_local.py / infer_codegen_local.py  (Qwen2.5 + PEFT adapters)
 ```
 
 ## Requirements
@@ -113,11 +119,14 @@ streamlit run app_full_workflow.py
 | Tab | Purpose |
 |-----|---------|
 | **Setup** | Verify provider / model / DB / token status. |
-| **Generate & Save** | Run `main.py` on a repo and save the result to the DB (auto‑builds the ontology). |
+| **Generate & Save** | Run `main.py` on a repo and save to the DB (auto‑builds the ontology). Shows a live GitHub‑URL structure analysis (whole repo / branch / subdirectory) and how it flows downstream. |
 | **Library** | Browse a saved tutorial: summary, flowchart, chapters. |
 | **RAG Search** | Ask a question; hybrid retrieval + optional LLM answer. |
 | **Chat** | Streaming multi‑turn conversation over the selected tutorial. |
-| **Ontology RAG** | Rebuild/inspect the concept graph and Mermaid diagram. |
+| **Multi‑Repo RAG** | Cross‑repo search over several tutorials + streamed synthesis of common/different/connectable patterns. |
+| **Agent** | Agentic RAG: the agent chooses tools and iterates; shows the step trace, then streams a grounded answer. |
+| **Ontology** | Rebuild/inspect the concept graph and Mermaid diagram. |
+| **Fine‑tune** | Build a code‑gen JSONL from selected repos and get ready‑to‑run 4GB QLoRA train/infer commands. |
 | **Admin** | Delete a single tutorial **or an entire repository** (all tutorials), with a count preview and optional local‑folder cleanup. |
 
 ## Semantic Search & Embeddings
@@ -138,14 +147,29 @@ and falls back to keyword scoring when they don't. Tune domain concepts in `rag_
 
 ## Fine‑tuning (optional, GPU)
 
+Two dataset flavors are built from stored repos:
+- **Explain** (chapter → explanation) via `export_finetune_jsonl`.
+- **Code‑gen** (instruction → real code block) via the **🛠 Fine‑tune** tab /
+  `export_codegen_jsonl`, aggregated across the repos you select.
+
+Train a small adapter — **4‑bit QLoRA fits ≤4GB VRAM (e.g. RTX 3050 Ti)**:
+
 ```bash
-pip install -r requirements-train.txt   # heavy (torch, transformers, peft, ...)
-python train_lora_local.py --train_jsonl exports/finetune_dataset.jsonl
-python infer_lora_local.py --adapter_dir finetuned_adapters/.../adapter --prompt "..." --language Korean
+pip install -r requirements-train.txt   # torch, transformers, peft, bitsandbytes, ...
+
+# 4GB VRAM (QLoRA): small model + 4-bit + short context
+python train_lora_local.py --train_jsonl exports/codegen_dataset.jsonl \
+  --load_4bit --model_name Qwen/Qwen2.5-0.5B-Instruct \
+  --out_dir finetuned_adapters/codegen_qwen05 --max_length 640 --epochs 2
+
+# Generate code with the trained adapter
+python infer_codegen_local.py \
+  --adapter_dir finetuned_adapters/codegen_qwen05/adapter \
+  --prompt "FastAPI 의존성 주입을 사용하는 엔드포인트 예시를 작성해줘" --load_4bit
 ```
 
-Training data (messages JSONL) is generated from stored chapters via the
-`create_finetune_examples_from_tutorial` / `export_finetune_jsonl` helpers in `db_store.py`.
+Focus datasets on small units (functions, config, usage snippets). The Fine‑tune
+tab reports example counts + language breakdown and prints these exact commands.
 
 ## Configuration reference
 
@@ -166,13 +190,16 @@ Training data (messages JSONL) is generated from stored chapters via the
 main.py, flow.py, nodes.py     PocketFlow generation pipeline
 utils/call_llm.py              LLM calls (cache + streaming)
 utils/crawl_*.py               GitHub / local crawlers
-db_store.py                    Postgres/pgvector: save, RAG, ontology, delete, fine‑tune
+db_store.py                    Postgres/pgvector: save, RAG, cross-repo, ontology, delete, datasets
+agent_rag.py                   agentic RAG (ReAct tool loop)
 rag_config.py                  per‑repo search tuning
 schema.sql                     database schema (pgvector, cascade)
-app_full_workflow.py           Streamlit app (7 tabs)
+app_full_workflow.py           Streamlit app (10 tabs)
+.streamlit/config.toml         app theme
 backfill_embeddings.py         embedding backfill utility
-train_lora_local.py            LoRA training      infer_lora_local.py  LoRA inference
-requirements.txt               app deps           requirements-train.txt  training deps
+train_lora_local.py            LoRA / QLoRA training
+infer_lora_local.py            explain inference    infer_codegen_local.py  code-gen inference
+requirements.txt               app deps             requirements-train.txt  training deps
 legacy/                        archived earlier Streamlit apps
 ```
 
