@@ -29,9 +29,19 @@ from db_store import (
     delete_repository_v4,
     count_related_v4,
     get_tutorial_repository,
+    update_tutorial_mermaid,
     db_counts_v3,
 )
-from agent_rag import agent_gather, build_agent_answer_prompt
+from agent_rag import (
+    agent_gather,
+    build_agent_answer_prompt,
+    judge_answer,
+    refine_answer,
+    deep_research,
+    build_deep_research_prompt,
+)
+from mermaid_utils import heal_mermaid
+import tracing
 
 load_dotenv(".env", override=True)
 
@@ -873,7 +883,29 @@ with tab_ontology:
             st.info("저장된 ontology 관계가 없습니다. Ontology 재구성을 실행하세요.")
 
         tutorial = get_tutorial(tutorial_id)
-        st.subheader("Original Mermaid")
+        st.subheader("Diagram")
+
+        heal_c1, heal_c2 = st.columns([1, 3])
+        with heal_c1:
+            if st.button("🩹 Mermaid 자동 복구", key="heal_mermaid"):
+                with st.spinner("LLM이 다이어그램 문법을 점검·복구 중..."):
+                    healed = heal_mermaid(tutorial["mermaid_graph"] or "")
+                st.session_state["healed_mermaid"] = {"tid": tutorial_id, **healed}
+
+        healed = st.session_state.get("healed_mermaid")
+        if healed and healed.get("tid") == tutorial_id:
+            st.caption(f"자동 복구: {healed['note']}")
+            if healed["changed"]:
+                st.markdown("**복구된 다이어그램 미리보기**")
+                render_mermaid(healed["mermaid"])
+                if st.button("💾 복구본을 DB에 저장", key="save_healed"):
+                    if update_tutorial_mermaid(tutorial_id, healed["mermaid"]):
+                        st.success("복구된 Mermaid를 저장했습니다. 새로고침 시 반영됩니다.")
+                    else:
+                        st.error("저장 실패")
+                st.divider()
+
+        st.markdown("**Original Mermaid**")
         st.code(tutorial["mermaid_graph"] or "", language="mermaid")
         render_mermaid(tutorial["mermaid_graph"])
 
@@ -1178,58 +1210,129 @@ with tab_agent:
             height=90,
             key="ag_q",
         )
-        agc1, agc2 = st.columns([1, 3])
-        ag_steps = agc1.slider("최대 스텝(도구 호출 수)", 2, 10, 6, key="ag_steps")
-        with agc2:
+        ag_mode = st.radio(
+            "탐색 모드",
+            ["에이전트 (ReAct)", "Deep Research (재귀 리서치)"],
+            horizontal=True,
+            key="ag_mode",
+        )
+        agc1, agc2, agc3 = st.columns([1, 1, 1])
+        ag_steps = agc1.slider("최대 스텝 / 하위질문 수", 2, 10, 5, key="ag_steps")
+        ag_judge = agc2.checkbox("답변 검증·개선 (Judge)", value=True, key="ag_judge")
+        with agc3:
             st.write("")
-            ag_go = st.button("🤖 에이전트 실행", type="primary", key="ag_go")
+            ag_go = st.button("🤖 실행", type="primary", key="ag_go")
 
-        st.caption("에이전트는 매 스텝 도구를 선택→실행→관측하며, 잘못된 액션은 스스로 교정하고, 스텝 예산 안에서 탐색을 마칩니다.")
+        st.caption(
+            "ReAct: 도구를 선택→실행→관측하며 잘못된 액션은 스스로 교정. "
+            "Deep Research: 질문을 하위질문으로 분해해 각각 검색 후 종합. "
+            "Judge: 답변을 채점하고 근거가 부족하면 한 번 자동 개선."
+        )
 
         if ag_go:
             ids = [t["id"] for t in ag_picked]
             if not ids:
                 st.warning("저장소를 1개 이상 선택하세요.")
             else:
-                with st.spinner("에이전트가 도구로 코드베이스를 탐색 중..."):
-                    ag_res = agent_gather(ids, ag_q, max_steps=ag_steps)
+                is_deep = ag_mode.startswith("Deep")
+                spin = "하위질문으로 분해해 심층 리서치 중..." if is_deep else "에이전트가 도구로 탐색 중..."
+                with st.spinner(spin):
+                    if is_deep:
+                        dr = deep_research(ids, ag_q, max_subq=ag_steps, per_subq_top=5)
+                        res = {
+                            "trace": [{"step": i + 1, "subq": s} for i, s in enumerate(dr["subquestions"])],
+                            "transcript": dr["transcript"],
+                            "steps": len(dr["subquestions"]),
+                            "finished": True,
+                            "mode": "deep",
+                        }
+                    else:
+                        res = agent_gather(ids, ag_q, max_steps=ag_steps)
+                        res["mode"] = "agent"
                 ag_lang = (ag_picked[0].get("language") if ag_picked else "Korean") or "Korean"
-                st.session_state["agent_run"] = {"res": ag_res, "q": ag_q, "lang": ag_lang}
+                try:
+                    trace_path = tracing.save_trace(
+                        res.get("mode", "agent"), ag_q, res["trace"],
+                        meta={"repos": [t["title"] for t in ag_picked],
+                              "steps": res["steps"], "finished": res["finished"]},
+                    )
+                except Exception:
+                    trace_path = None
+                st.session_state["agent_run"] = {
+                    "res": res, "q": ag_q, "lang": ag_lang,
+                    "judge": ag_judge, "trace_path": trace_path,
+                }
 
         agent_data = st.session_state.get("agent_run")
         if agent_data:
             res = agent_data["res"]
+            mode = res.get("mode", "agent")
             render_chips([
-                status_chip("스텝", str(res["steps"])),
-                status_chip("종료", "finish" if res["finished"] else "예산 소진", ok=res["finished"]),
-                status_chip("도구 호출", str(len([s for s in res["trace"] if s.get("tool")]))),
+                status_chip("모드", "Deep Research" if mode == "deep" else "ReAct 에이전트"),
+                status_chip("스텝" if mode == "agent" else "하위질문", str(res["steps"])),
+                status_chip("종료", "완료" if res["finished"] else "예산 소진", ok=res["finished"]),
             ])
+            if agent_data.get("trace_path"):
+                st.caption(f"🧾 트레이스 저장됨: `{agent_data['trace_path']}`")
 
-            st.markdown("#### 🧭 에이전트 트레이스")
-            for s in res["trace"]:
-                if s.get("error"):
-                    st.warning(f"Step {s['step']}: 유효하지 않은 액션 → 자기 교정")
-                    continue
-                tool = s.get("tool")
-                icon = _AGENT_TOOL_ICON.get(tool, "🔧")
-                arg_str = ", ".join(f"{k}={v}" for k, v in (s.get("args") or {}).items())
-                with st.expander(f"{icon} Step {s['step']} · {tool}({arg_str})"):
-                    if s.get("thought"):
-                        st.caption(f"💭 {s['thought']}")
-                    if s.get("observation"):
-                        st.code((s["observation"])[:1200], language="text")
+            st.markdown("#### 🧭 트레이스")
+            if mode == "deep":
+                for s in res["trace"]:
+                    st.markdown(f"- **하위질문 {s['step']}**: {s['subq']}")
+            else:
+                for s in res["trace"]:
+                    if s.get("error"):
+                        st.warning(f"Step {s['step']}: 유효하지 않은 액션 → 자기 교정")
+                        continue
+                    tool = s.get("tool")
+                    icon = _AGENT_TOOL_ICON.get(tool, "🔧")
+                    arg_str = ", ".join(f"{k}={v}" for k, v in (s.get("args") or {}).items())
+                    with st.expander(f"{icon} Step {s['step']} · {tool}({arg_str})"):
+                        if s.get("thought"):
+                            st.caption(f"💭 {s['thought']}")
+                        if s.get("observation"):
+                            st.code((s["observation"])[:1200], language="text")
 
             st.markdown("#### 🧠 최종 답변")
-            ans_prompt = build_agent_answer_prompt(
-                agent_data["q"], res["transcript"], language=agent_data.get("lang", "Korean")
-            )
-            if not res["transcript"].strip():
-                st.warning("근거를 수집하지 못했습니다. 질문을 바꾸거나 스텝 수를 늘려보세요.")
+            transcript = res["transcript"]
+            if not transcript.strip():
+                st.warning("근거를 수집하지 못했습니다. 질문을 바꾸거나 스텝/하위질문 수를 늘려보세요.")
             else:
-                try:
-                    from utils.call_llm import call_llm_stream
+                lang = agent_data.get("lang", "Korean")
+                builder = build_deep_research_prompt if mode == "deep" else build_agent_answer_prompt
+                ans_prompt = builder(agent_data["q"], transcript, language=lang)
+                if agent_data.get("judge"):
+                    from utils.call_llm import call_llm
 
-                    st.write_stream(call_llm_stream(ans_prompt))
-                except Exception as e:
-                    st.error("답변 생성 실패")
-                    st.exception(e)
+                    with st.spinner("답변 생성 및 검증(Judge) 중..."):
+                        answer = call_llm(ans_prompt, use_cache=False)
+                        verdict = judge_answer(agent_data["q"], transcript, answer)
+                        refined = False
+                        if not verdict["grounded"] or verdict["score"] < 4:
+                            answer = refine_answer(agent_data["q"], transcript, answer, verdict["issues"], language=lang)
+                            refined = True
+                            verdict = judge_answer(agent_data["q"], transcript, answer)
+                    render_chips([
+                        status_chip("Judge 점수", f"{verdict['score']}/5", ok=verdict["score"] >= 4),
+                        status_chip("근거 충실", "예" if verdict["grounded"] else "아니오", ok=verdict["grounded"]),
+                        status_chip("개선", "적용됨" if refined else "불필요"),
+                    ])
+                    if verdict.get("issues"):
+                        st.caption(f"🔎 Judge 코멘트: {verdict['issues']}")
+                    st.markdown(answer)
+                else:
+                    try:
+                        from utils.call_llm import call_llm_stream
+
+                        st.write_stream(call_llm_stream(ans_prompt))
+                    except Exception as e:
+                        st.error("답변 생성 실패")
+                        st.exception(e)
+
+        with st.expander("🧾 실행 추적 기록 (Tracing)"):
+            recent = tracing.list_traces(15)
+            if not recent:
+                st.caption("아직 저장된 트레이스가 없습니다.")
+            else:
+                for tr in recent:
+                    st.markdown(f"- `{tr['created_at']}` · **{tr['kind']}** · {(tr['question'] or '')[:70]}")
