@@ -2523,3 +2523,16 @@ def export_codegen_jsonl(
         "by_language": dict(sorted(lang_counts.items(), key=lambda kv: kv[1], reverse=True)),
     }
 
+
+def update_tutorial_mermaid(tutorial_id: str, mermaid: str) -> bool:
+    """Persist a (e.g. self-healed) Mermaid graph back onto a tutorial."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "update tutorials set mermaid_graph = %s where id = %s",
+                (mermaid, tutorial_id),
+            )
+            updated = cur.rowcount
+        conn.commit()
+    return updated > 0
+

@@ -144,8 +144,9 @@ def _dispatch(tool: str, args: dict, ctx: dict) -> str:
 # Action parsing (robust)
 # -----------------------------
 
-def _parse_action(raw: str):
-    """Extract a JSON action object from an LLM response. Returns dict or None."""
+def _extract_json(raw: str):
+    """Extract the first JSON object from an LLM response. Returns dict or None.
+    Handles ```json fences and stray text around the object."""
     if not raw:
         return None
     text = raw.strip()
@@ -156,8 +157,7 @@ def _parse_action(raw: str):
         start = text.find("{")
         if start == -1:
             return None
-        depth = 0
-        end = None
+        depth, end = 0, None
         for i in range(start, len(text)):
             if text[i] == "{":
                 depth += 1
@@ -173,9 +173,13 @@ def _parse_action(raw: str):
         obj = json.loads(text)
     except json.JSONDecodeError:
         return None
-    if not isinstance(obj, dict) or "tool" not in obj:
-        return None
-    return obj
+    return obj if isinstance(obj, dict) else None
+
+
+def _parse_action(raw: str):
+    """Extract a JSON action object (must have a 'tool' key). Returns dict or None."""
+    obj = _extract_json(raw)
+    return obj if obj and "tool" in obj else None
 
 
 # -----------------------------
@@ -274,3 +278,127 @@ def agent_gather(tutorial_ids: list[str], question: str, max_steps: int = DEFAUL
         )
 
     return {"trace": trace, "transcript": transcript, "steps": step, "finished": False}
+
+
+# ============================================================
+# Judge: LLM-as-Judge evaluator-optimizer
+# Score an answer's groundedness against the gathered evidence, then refine
+# once if it's weak/hallucinated.
+# ============================================================
+
+def judge_answer(question: str, evidence: str, answer: str) -> dict:
+    """Return {grounded: bool, score: 1-5, issues: str}. Fails open (score 3)
+    if the judge output can't be parsed, so it never blocks answering."""
+    prompt = f"""너는 엄격한 답변 평가자다. 오직 [근거]만을 기준으로 [답변]이 근거에 충실한지 평가하라.
+반드시 JSON 하나만 출력(다른 텍스트 금지):
+{{"grounded": true 또는 false, "score": 1~5 정수, "issues": "환각/근거부족/누락을 간단히"}}
+
+[질문]
+{question}
+
+[근거]
+{evidence[:6000]}
+
+[답변]
+{answer}"""
+    obj = _extract_json(call_llm(prompt, use_cache=False)) or {}
+    try:
+        score = int(obj.get("score", 3))
+    except (TypeError, ValueError):
+        score = 3
+    return {
+        "grounded": bool(obj.get("grounded", True)),
+        "score": max(1, min(score, 5)),
+        "issues": str(obj.get("issues", "")).strip(),
+    }
+
+
+def refine_answer(question: str, evidence: str, answer: str, issues: str, language: str = "Korean") -> str:
+    language = (language or "Korean").strip() or "Korean"
+    prompt = f"""아래 [기존 답변]을 [근거]에 더 충실하도록 개선하라.
+- [지적사항]을 반영하고, 근거에 없는 내용은 삭제하라.
+- 근거로 뒷받침되는 저장소·챕터를 밝혀라.
+- 반드시 {language} 언어로 작성하라.
+
+[질문]
+{question}
+
+[지적사항]
+{issues}
+
+[근거]
+{evidence[:6000]}
+
+[기존 답변]
+{answer}
+
+[개선된 답변]:"""
+    return call_llm(prompt, use_cache=False)
+
+
+# ============================================================
+# Deep Research: decompose -> per-subquestion retrieval -> synthesize
+# (bounded 1-level recursive map-reduce over one or more repos)
+# ============================================================
+
+def decompose_question(question: str, repos_label: str, n: int = 4) -> list[str]:
+    prompt = f"""'{repos_label}' 저장소(들)에 대한 아래 질문에 제대로 답하기 위해 조사해야 할
+핵심 하위 질문 {n}개를 만들어라. 반드시 JSON 하나만 출력:
+{{"subquestions": ["...", "..."]}}
+
+[질문]
+{question}"""
+    obj = _extract_json(call_llm(prompt, use_cache=False)) or {}
+    subs = [s for s in (obj.get("subquestions") or []) if isinstance(s, str) and s.strip()]
+    return subs[:n] or [question]
+
+
+def deep_research(tutorial_ids: list[str], question: str, max_subq: int = 4, per_subq_top: int = 5) -> dict:
+    """Map-reduce research: split the question into sub-questions, retrieve
+    (cross-repo) evidence for each, and return a combined transcript + trace."""
+    if not tutorial_ids or not (question or "").strip():
+        return {"subquestions": [], "findings": [], "transcript": "", "trace": []}
+
+    ctx = build_context(tutorial_ids)
+    repos_label = ", ".join(_repo_label(ctx, tid) for tid in tutorial_ids)
+    subs = decompose_question(question, repos_label, n=max_subq)
+
+    findings, trace = [], []
+    for i, sq in enumerate(subs, start=1):
+        hits = (
+            search_across_tutorials(tutorial_ids, sq, top_k=per_subq_top)
+            if len(tutorial_ids) > 1
+            else search_tutorial_context_v4(tutorial_ids[0], sq, top_k=per_subq_top)
+        )
+        ev = "\n".join(
+            f"- [{(h.get('tutorial_title') or '').replace('Tutorial: ', '') or _repo_label(ctx, tutorial_ids[0])} "
+            f"· Ch{h.get('chapter_no')} {h.get('chapter_title')}] {(h.get('content') or '')[:240]}"
+            for h in hits
+        )
+        findings.append({"subq": sq, "evidence": ev, "hits": len(hits)})
+        trace.append({"step": i, "subq": sq, "hits": len(hits)})
+
+    transcript = "\n\n".join(
+        f"[하위질문 {i}] {f['subq']}\n{f['evidence'] or '(근거 없음)'}"
+        for i, f in enumerate(findings, start=1)
+    )
+    return {"subquestions": subs, "findings": findings, "transcript": transcript, "trace": trace}
+
+
+def build_deep_research_prompt(question: str, transcript: str, language: str = "Korean") -> str:
+    language = (language or "Korean").strip() or "Korean"
+    return f"""너는 여러 하위 질문의 검색 결과를 종합하는 시니어 리서처다.
+아래 [하위질문별 근거]만 사용해 {language} 언어로 심층적으로 답하라. 근거 없는 내용은 추측하지 마라.
+
+[질문]
+{question}
+
+[하위질문별 근거]
+{transcript if transcript.strip() else "(근거 없음)"}
+
+[답변 형식]
+1. 핵심 요약
+2. 하위 질문별 발견
+3. 종합 결론(저장소 간 연결/비교 포함)
+4. 근거(저장소 · 챕터)
+""".strip()
