@@ -105,6 +105,8 @@ output/
 # Provider-specific secret env files (keep only the sample tracked)
 .env.*
 !.env.sample
+# Streamlit local secrets (paste-source for Cloud Secrets; never commit)
+.streamlit/secrets.toml
 # Streamlit / generation outputs and ML artifacts
 streamlit_output/
 output_*/
