@@ -1,5 +1,5 @@
-# LoRA fine-tuning / local inference dependencies.
-# Only needed for train_lora_local.py and infer_lora_local.py.
+# LoRA / QLoRA fine-tuning + local inference dependencies.
+# Needed for train_lora_local.py, infer_lora_local.py, infer_codegen_local.py.
 # Requires a CUDA-capable GPU. Install a torch build matching your CUDA
 # version first (see https://pytorch.org/get-started/locally/), e.g.:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
@@ -13,3 +13,7 @@ accelerate>=1.0.0
 safetensors>=0.4.5
 sentencepiece>=0.2.0
 protobuf>=5.0.0
+
+# 4-bit QLoRA (required for --load_4bit on <=4GB GPUs like RTX 3050 Ti).
+# On Windows use a recent build that ships CUDA binaries.
+bitsandbytes>=0.43.0

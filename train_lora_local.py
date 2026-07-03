@@ -4,10 +4,11 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
@@ -78,6 +79,12 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
 
+    parser.add_argument(
+        "--load_4bit",
+        action="store_true",
+        help="4-bit QLoRA (bitsandbytes). Recommended for <=4GB VRAM (e.g. RTX 3050 Ti).",
+    )
+
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -116,15 +123,33 @@ def main():
         remove_columns=dataset.column_names,
     )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        torch_dtype=torch.float16,
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-    )
-
-    model.config.use_cache = False
-    model.gradient_checkpointing_enable()
+    if args.load_4bit:
+        # QLoRA: load base weights in 4-bit (nf4) to fit small GPUs.
+        print("Loading base model in 4-bit (QLoRA)...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            quantization_config=bnb_config,
+            device_map={"": 0},
+            trust_remote_code=True,
+        )
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
 
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
