@@ -1206,6 +1206,46 @@ with tab_finetune:
         else:
             st.info("저장소를 선택하고 **코드젠 데이터셋 생성**을 누르면, 학습용 JSONL과 4GB용 학습/추론 명령이 표시됩니다.")
 
+    # --- Run a locally trained adapter to generate code (subprocess) ---
+    st.divider()
+    st.markdown("#### 🤖 학습된 어댑터로 코드 생성")
+    ad_col1, ad_col2 = st.columns(2)
+    ft_adapter = ad_col1.text_input("어댑터 경로", value="finetuned_adapters/codegen_qwen05/adapter", key="ft_adapter")
+    ft_base = ad_col2.text_input("Base 모델", value="Qwen/Qwen2.5-0.5B-Instruct", key="ft_base")
+    ft_prompt = st.text_area("코드 생성 프롬프트", value="requests로 세션과 재시도 어댑터를 설정해 안정적으로 GET 요청하는 코드를 작성해줘", height=80, key="ft_infer_prompt")
+    ft_4bit = st.checkbox("4-bit 로드 (--load_4bit, 4GB 권장)", value=True, key="ft_4bit")
+
+    if st.button("코드 생성 실행", type="primary", key="ft_infer_run"):
+        if not Path(ft_adapter).exists():
+            st.error(f"어댑터 경로가 없습니다: {ft_adapter} — 먼저 위 명령으로 학습하세요.")
+        else:
+            cmd = [
+                sys.executable, "infer_codegen_local.py",
+                "--adapter_dir", ft_adapter, "--base_model", ft_base,
+                "--prompt", ft_prompt, "--max_new_tokens", "256",
+            ]
+            if ft_4bit:
+                cmd.append("--load_4bit")
+            child_env = os.environ.copy()
+            child_env["PYTHONIOENCODING"] = "utf-8"
+            child_env["PYTHONUTF8"] = "1"
+            try:
+                with st.spinner("모델 로드 + 코드 생성 중... (최초/4-bit는 수십 초 소요)"):
+                    proc = subprocess.run(
+                        cmd, env=child_env, text=True, encoding="utf-8",
+                        errors="replace", capture_output=True, timeout=600,
+                    )
+                out = proc.stdout or ""
+                if proc.returncode != 0:
+                    st.error("코드 생성 실패")
+                    st.code((out[-2000:] + "\n" + (proc.stderr or "")[-1500:]), language="text")
+                else:
+                    # Show the assistant portion (after the last 'assistant' marker if present)
+                    shown = out.split("assistant", 1)[-1].strip() if "assistant" in out else out.strip()
+                    st.code(shown[-4000:] or "(빈 출력)", language="python")
+            except subprocess.TimeoutExpired:
+                st.error("시간 초과(600s). 더 작은 max_new_tokens로 다시 시도하세요.")
+
 
 # -----------------------------
 # Agent (Agentic RAG) tab
