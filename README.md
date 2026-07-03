@@ -189,6 +189,29 @@ tab reports example counts + language breakdown and prints these exact commands.
 | `GITHUB_TOKEN` | Higher rate limits / private repos |
 | `RAG_CREATE_EMBEDDINGS` | `1` to embed chunks on save |
 | `MAX_ABSTRACTION_CONTEXT_CHARS` | Budget for the abstraction prompt on huge repos (default 900000) |
+| `APP_USERNAME` / `APP_PASSWORD` | Optional shared login for the Streamlit app. When **both** are set, the app shows a login screen; leave both empty to disable the gate. See [Access control](#access-control-team-login). |
+
+## Access control (team login)
+
+The Streamlit app (`app_full_workflow.py`) can be restricted to your team with a
+simple shared credential:
+
+- Set `APP_USERNAME` and `APP_PASSWORD` (in `.env` locally, or in **Streamlit
+  Secrets** when deployed). When both are present, a login screen gates the
+  whole app; a logout button appears in the sidebar. If either is empty the gate
+  is disabled (open access, with a warning).
+- Credentials are read from the environment and **never hardcoded**, so
+  committing the app can't leak the password. Comparison is constant‑time.
+
+Secret handling in the sidebar is hardened for shared/deployed use: existing
+keys (`*_API_KEY`, `GITHUB_TOKEN`, `DATABASE_URL`) are **never pre‑filled** into
+inputs and the password reveal ("eye") button is hidden, so secrets can't be
+read off the screen. To change a value you must explicitly opt in per session.
+
+> This is a single shared credential, adequate for keeping an internal tool
+> private. For per‑user accounts / audit logs, add a dedicated auth layer
+> (e.g. `streamlit-authenticator` or your SSO). On Streamlit Community Cloud,
+> also consider restricting **viewer emails** as a second layer.
 
 ## Project layout
 
