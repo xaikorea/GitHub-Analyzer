@@ -37,6 +37,10 @@ GitHub Analyzer는 공개/로컬 코드베이스를 크롤링해 **초보자용 
 | **Hybrid RAG** | Semantic vector search when embeddings exist, transparent fallback to concept‑aware keyword scoring otherwise. Per‑repo tuning via `rag_config.py`. |
 | **Multi‑repo RAG** | Search several saved repos at once with fair per‑repo score normalization, then synthesize/compare across them (`search_across_tutorials`). |
 | **Agentic RAG** | A ReAct agent (`agent_rag.py`) picks tools (search / read_chapter / ontology / finish) and iterates, with strict JSON actions, self‑correction, a step budget, and a visible trace. |
+| **Deep Research** | Alternate agent mode: decompose the question into sub‑questions, retrieve cross‑repo evidence per sub‑question, then synthesize (`deep_research`). |
+| **Judge (verify & refine)** | LLM‑as‑Judge scores an answer's groundedness (1–5); if weak/hallucinated it auto‑refines once. Available in the Agent and RAG Search tabs. |
+| **Self‑healing Mermaid** | `mermaid_utils.heal_mermaid` repairs broken diagrams via the LLM; the Ontology tab previews and can save the fix. |
+| **Tracing** | Agent / Deep Research runs are persisted (Postgres `agent_traces`, else JSON files) and browsable in‑app (`tracing.py`). |
 | **Streaming chat** | Multi‑turn conversation over a tutorial's knowledge, per‑tutorial history, token‑by‑token streaming (Gemini & OpenAI‑compatible). |
 | **Ontology graph** | Extracts a concept graph (Mermaid + chapter order + markdown links) and renders it. |
 | **Repo‑wide delete** | `ON DELETE CASCADE` removes a repository and *all* its tutorials/chapters/chunks/embeddings/ontology/fine‑tuning/logs, with a pre‑delete count preview. |
@@ -54,8 +58,10 @@ Layer A — Generation pipeline (PocketFlow)
   → writes output/<project>/index.md + NN_*.md
 
 Layer B — Storage, RAG & app
-  db_store.py            (Postgres/pgvector: save, search, cross-repo, ontology, delete, datasets)
-  agent_rag.py           (agentic RAG: ReAct tool loop over the stored repos)
+  db_store.py            (Postgres/pgvector: save, search, cross-repo, ontology, delete, datasets, traces)
+  agent_rag.py           (agentic RAG: ReAct loop, Judge verify/refine, Deep Research)
+  mermaid_utils.py       (self-healing Mermaid repair)
+  tracing.py             (persist/list/load run traces — DB or JSON files)
   rag_config.py          (per‑repo concept aliases / stop terms)
   app_full_workflow.py   (Streamlit UI — 10 tabs)
   backfill_embeddings.py (populate embeddings for existing chunks)
@@ -124,8 +130,8 @@ streamlit run app_full_workflow.py
 | **RAG Search** | Ask a question; hybrid retrieval + optional LLM answer. |
 | **Chat** | Streaming multi‑turn conversation over the selected tutorial. |
 | **Multi‑Repo RAG** | Cross‑repo search over several tutorials + streamed synthesis of common/different/connectable patterns. |
-| **Agent** | Agentic RAG: the agent chooses tools and iterates; shows the step trace, then streams a grounded answer. |
-| **Ontology** | Rebuild/inspect the concept graph and Mermaid diagram. |
+| **Agent** | Agentic RAG with a mode toggle — **ReAct** (tool loop) or **Deep Research** (sub‑question map‑reduce) — an optional **Judge** verify+refine pass, the step trace, and a viewer of past runs (Tracing). |
+| **Ontology** | Rebuild/inspect the concept graph and Mermaid diagram; **🩹 self‑heal** a broken diagram and optionally save it. |
 | **Fine‑tune** | Build a code‑gen JSONL from selected repos and get ready‑to‑run 4GB QLoRA train/infer commands. |
 | **Admin** | Delete a single tutorial **or an entire repository** (all tutorials), with a count preview and optional local‑folder cleanup. |
 
@@ -191,7 +197,8 @@ main.py, flow.py, nodes.py     PocketFlow generation pipeline
 utils/call_llm.py              LLM calls (cache + streaming)
 utils/crawl_*.py               GitHub / local crawlers
 db_store.py                    Postgres/pgvector: save, RAG, cross-repo, ontology, delete, datasets
-agent_rag.py                   agentic RAG (ReAct tool loop)
+agent_rag.py                   agentic RAG (ReAct loop, Judge, Deep Research)
+mermaid_utils.py               self-healing Mermaid    tracing.py  run-trace store
 rag_config.py                  per‑repo search tuning
 schema.sql                     database schema (pgvector, cascade)
 app_full_workflow.py           Streamlit app (10 tabs)

@@ -2536,3 +2536,60 @@ def update_tutorial_mermaid(tutorial_id: str, mermaid: str) -> bool:
         conn.commit()
     return updated > 0
 
+
+# ============================================================
+# Tracing persistence (agent_traces table)
+# ============================================================
+
+def save_trace_db(kind: str, question: str, trace: list, meta: dict | None = None) -> str:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into agent_traces (kind, question, meta, trace)
+                values (%s, %s, %s::jsonb, %s::jsonb)
+                returning id::text
+                """,
+                (
+                    kind,
+                    question,
+                    json.dumps(meta or {}, ensure_ascii=False),
+                    json.dumps(trace or [], ensure_ascii=False),
+                ),
+            )
+            trace_id = cur.fetchone()[0]
+        conn.commit()
+    return trace_id
+
+
+def list_traces_db(limit: int = 20) -> list[dict]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select id::text, kind, question, created_at
+                from agent_traces
+                order by created_at desc
+                limit %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [
+        {"id": r[0], "kind": r[1], "question": r[2], "created_at": str(r[3])[:19]}
+        for r in rows
+    ]
+
+
+def get_trace_db(trace_id: str) -> dict | None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select id::text, kind, question, meta, trace, created_at from agent_traces where id = %s",
+                (trace_id,),
+            )
+            r = cur.fetchone()
+    if not r:
+        return None
+    return {"id": r[0], "kind": r[1], "question": r[2], "meta": r[3], "trace": r[4], "created_at": str(r[5])[:19]}
+

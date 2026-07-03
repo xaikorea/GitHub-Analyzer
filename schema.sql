@@ -138,3 +138,17 @@ CREATE TABLE IF NOT EXISTS rag_logs (
     metadata                      jsonb,
     created_at                    timestamptz DEFAULT now()
 );
+
+-- agent_traces -----------------------------------------------
+-- Persisted execution traces for the Agent / Deep Research runs (Tracing).
+-- No FK: a trace may span multiple repositories.
+CREATE TABLE IF NOT EXISTS agent_traces (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind        text NOT NULL,
+    question    text,
+    meta        jsonb,
+    trace       jsonb NOT NULL,
+    created_at  timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS agent_traces_created_idx ON agent_traces USING btree (created_at DESC);

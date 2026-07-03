@@ -697,6 +697,13 @@ with tab_rag:
 
         top_k = st.slider("검색 chunk 수", min_value=1, max_value=10, value=5)
 
+        rag_judge = st.checkbox(
+            "답변 검증·개선 (Judge)",
+            value=False,
+            key="rag_judge",
+            help="LLM-as-Judge로 답변의 근거 충실도를 채점하고, 부족하면 한 번 자동 개선합니다.",
+        )
+
         col1, col2 = st.columns(2)
 
         with col1:
@@ -747,8 +754,30 @@ with tab_rag:
                 try:
                     from utils.call_llm import call_llm
 
+                    rag_lang = selected_tutorial.get("language") or "Korean"
                     with st.spinner("LLM 답변 생성 중..."):
                         answer = call_llm(rag_prompt)
+
+                        if rag_judge:
+                            evidence = "\n\n".join(
+                                f"[Ch{r['chapter_no']} {r['chapter_title']}]\n{r['content']}"
+                                for r in results
+                            )
+                            verdict = judge_answer(saved_question, evidence, answer)
+                            refined = False
+                            if not verdict["grounded"] or verdict["score"] < 4:
+                                answer = refine_answer(saved_question, evidence, answer, verdict["issues"], language=rag_lang)
+                                refined = True
+                                verdict = judge_answer(saved_question, evidence, answer)
+
+                    if rag_judge:
+                        render_chips([
+                            status_chip("Judge 점수", f"{verdict['score']}/5", ok=verdict["score"] >= 4),
+                            status_chip("근거 충실", "예" if verdict["grounded"] else "아니오", ok=verdict["grounded"]),
+                            status_chip("개선", "적용됨" if refined else "불필요"),
+                        ])
+                        if verdict.get("issues"):
+                            st.caption(f"🔎 Judge 코멘트: {verdict['issues']}")
 
                     st.markdown(answer)
 
