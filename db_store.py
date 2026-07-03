@@ -44,6 +44,59 @@ def slug_from_repo_url(repo_url: str) -> dict[str, str | None]:
     return result
 
 
+def describe_repo_url(url: str) -> dict:
+    """Parse a GitHub URL into its structural parts so the UI can explain
+    exactly what will be analyzed.
+
+    Handles:
+      https://github.com/owner/repo                     -> whole repo, default branch
+      https://github.com/owner/repo/tree/<ref>          -> that branch/commit, whole
+      https://github.com/owner/repo/tree/<ref>/<path>   -> only that subdirectory
+      https://github.com/owner/repo/blob/<ref>/<file>   -> a single file (usually not intended)
+      git@github.com:owner/repo.git / *.git             -> whole repo
+    Returns a dict of facts (no UI text): valid, owner, repo, repo_name, kind
+    ('repo'|'tree'|'blob'|'invalid'), ref, sub_path, scope
+    ('whole_repo'|'subdirectory'|'single_file'), canonical_url.
+    """
+    url = (url or "").strip()
+    result = {
+        "valid": False, "owner": None, "repo": None, "repo_name": None,
+        "kind": "invalid", "ref": None, "sub_path": None,
+        "scope": None, "canonical_url": url,
+    }
+
+    m = re.search(r"github\.com[:/]+([^/]+)/([^/#?]+)", url)
+    if not m:
+        return result
+
+    owner = m.group(1)
+    repo = m.group(2).replace(".git", "")
+    result.update(valid=True, owner=owner, repo=repo, repo_name=f"{owner}/{repo}", kind="repo")
+
+    tb = re.search(r"/(tree|blob)/([^/]+)(?:/(.*))?$", url)
+    if tb:
+        result["kind"] = tb.group(1)
+        result["ref"] = tb.group(2)
+        sub = (tb.group(3) or "").strip("/")
+        result["sub_path"] = sub or None
+
+    if result["kind"] == "blob":
+        result["scope"] = "single_file"
+    elif result["sub_path"]:
+        result["scope"] = "subdirectory"
+    else:
+        result["scope"] = "whole_repo"
+
+    canonical = f"https://github.com/{owner}/{repo}"
+    if result["ref"]:
+        canonical += f"/{result['kind']}/{result['ref']}"
+        if result["sub_path"]:
+            canonical += f"/{result['sub_path']}"
+    result["canonical_url"] = canonical
+
+    return result
+
+
 def extract_mermaid(markdown: str) -> str:
     """
     ```mermaid ... ``` 블록을 추출.
@@ -2274,4 +2327,199 @@ build_rag_prompt_v3 = build_rag_prompt_v4
 _parse_mermaid_v3 = _parse_mermaid_v4
 rebuild_ontology_v3 = rebuild_ontology_v4
 get_ontology_context_v3 = get_ontology_context_v4
+
+
+# ============================================================
+# v5: Multi-repository (cross-repo) RAG
+# Search several saved tutorials at once, fuse results fairly, and let the
+# LLM synthesize/connect knowledge across repositories.
+# ============================================================
+
+
+def search_across_tutorials(
+    tutorial_ids: list[str],
+    query: str,
+    top_k: int = 8,
+    per_repo_top: int = 6,
+) -> list[dict]:
+    """Cross-repo hybrid search.
+
+    Runs the same per-tutorial hybrid search (vector -> keyword) for each
+    tutorial, tags every hit with its tutorial/repo, then fuses the lists.
+    Scores from different repos are not directly comparable (cosine vs.
+    keyword scale, or different embedding coverage), so each repo's hits are
+    min-max normalized to [0, 1] before merging — a fair, scale-agnostic
+    fusion that still preserves within-repo ranking.
+    """
+    query = (query or "").strip()
+    if not query or not tutorial_ids:
+        return []
+
+    merged: list[dict] = []
+    for tid in tutorial_ids:
+        hits = search_tutorial_context_v4(tid, query, top_k=per_repo_top)
+        if not hits:
+            continue
+        t = get_tutorial(tid) or {}
+        smax = max((h.get("score") or 0) for h in hits) or 1
+        for h in hits:
+            h["tutorial_id"] = tid
+            h["tutorial_title"] = t.get("title") or tid
+            h["source_repo_url"] = t.get("source_repo_url") or ""
+            h["norm_score"] = round((h.get("score") or 0) / smax, 4)
+            merged.append(h)
+
+    merged.sort(key=lambda x: x["norm_score"], reverse=True)
+    return merged[:top_k]
+
+
+def build_multi_repo_rag_prompt(question: str, contexts: list[dict], language: str = "Korean") -> str:
+    """RAG prompt that groups retrieved context by source repository so the
+    model can compare/connect concepts across repos and cite which repo each
+    fact came from."""
+    language = (language or "Korean").strip() or "Korean"
+
+    by_repo: dict[str, list[dict]] = {}
+    for c in contexts:
+        label = c.get("tutorial_title") or c.get("source_repo_url") or "unknown"
+        by_repo.setdefault(label, []).append(c)
+
+    blocks = []
+    for repo_label, items in by_repo.items():
+        lines = [f"### 저장소: {repo_label}"]
+        for i, c in enumerate(items, start=1):
+            lines.append(
+                f"[{i}] Chapter {c.get('chapter_no')} - {c.get('chapter_title')} "
+                f"(file: {c.get('filename')})\n{c.get('content')}"
+            )
+        blocks.append("\n".join(lines))
+
+    repo_names = ", ".join(by_repo.keys()) or "(없음)"
+
+    return f"""
+너는 여러 오픈소스 코드베이스를 함께 이해하고 {language} 언어로 설명하는 시니어 엔지니어다.
+아래에는 서로 다른 저장소에서 검색된 근거가 저장소별로 묶여 있다: {repo_names}
+
+규칙:
+- 각 저장소의 근거만 사용하고, 사실에는 어느 저장소(그리고 챕터)에서 나왔는지 밝혀라.
+- 저장소 간 공통점·차이점·연결 가능성(예: A의 개념을 B에 어떻게 접목할지)을 적극적으로 짚어라.
+- 근거가 부족하면 추측하지 말고 부족하다고 말하라.
+- 반드시 {language} 언어로 답하라.
+
+[사용자 질문]
+{question}
+
+[저장소별 검색 근거]
+{chr(10).join(blocks) if blocks else "(관련 근거를 찾지 못함)"}
+
+[답변 형식]
+1. 핵심 답변
+2. 저장소별 근거 요약 (저장소명 · 챕터)
+3. 저장소 간 연결/비교 인사이트
+""".strip()
+
+
+# ============================================================
+# v5: Code-generation fine-tuning dataset (multi-repo)
+# Extract real code blocks from stored tutorials and turn them into
+# (instruction -> code) chat examples for small local LoRA fine-tuning.
+# ============================================================
+
+CODEGEN_SYSTEM_PROMPT = (
+    "You are a coding assistant that writes small, correct code units "
+    "(functions, classes, config, usage snippets) in the style of the "
+    "referenced open-source codebases. Output only the code in a fenced block."
+)
+
+_CODE_LANGS = {
+    "python", "py", "javascript", "js", "jsx", "typescript", "ts", "tsx",
+    "go", "java", "c", "cpp", "c++", "cc", "h", "rust", "rs", "ruby", "rb",
+    "php", "bash", "sh", "shell", "yaml", "yml", "toml", "json", "sql",
+    "kotlin", "swift", "scala",
+}
+
+
+def _extract_code_blocks(markdown: str):
+    """Yield (lang, code) fenced blocks, skipping prose/mermaid/output blocks."""
+    for lang, code in re.findall(r"```([\w+#-]*)\s*\n(.*?)```", markdown or "", flags=re.S):
+        lang_norm = (lang or "").strip().lower()
+        if lang_norm in {"mermaid", "text", "markdown", "md", "console", "output", "diff"}:
+            continue
+        yield lang_norm, code.strip()
+
+
+def build_codegen_examples(
+    tutorial_ids: list[str],
+    min_code_lines: int = 3,
+    max_per_tutorial: int | None = None,
+) -> list[dict]:
+    """Build (instruction -> code) chat examples from stored chapters across
+    one or more tutorials. Focuses on small units by using each fenced code
+    block as a target and synthesizing an instruction from its chapter."""
+    examples: list[dict] = []
+
+    for tid in tutorial_ids:
+        tutorial = get_tutorial(tid) or {}
+        chapters = get_chapters(tid)
+        project = (tutorial.get("title") or "").replace("Tutorial: ", "").strip()
+        repo = tutorial.get("source_repo_url") or ""
+        count = 0
+
+        for ch in chapters:
+            for lang, code in _extract_code_blocks(ch.get("markdown")):
+                if code.count("\n") + 1 < min_code_lines:
+                    continue
+                if max_per_tutorial and count >= max_per_tutorial:
+                    break
+
+                lang_hint = lang or "code"
+                instruction = (
+                    f"`{project}` 코드베이스의 '{ch['title']}' 개념을 보여주는 "
+                    f"{lang_hint} 코드를 작성해줘."
+                )
+                answer = f"```{lang}\n{code}\n```"
+
+                examples.append({
+                    "tutorial_id": tid,
+                    "task_type": "codegen",
+                    "language": lang_hint,
+                    "chapter_no": ch["chapter_no"],
+                    "chapter_title": ch["title"],
+                    "repo": repo,
+                    "messages": [
+                        {"role": "system", "content": CODEGEN_SYSTEM_PROMPT},
+                        {"role": "user", "content": instruction},
+                        {"role": "assistant", "content": answer},
+                    ],
+                })
+                count += 1
+
+    return examples
+
+
+def export_codegen_jsonl(
+    tutorial_ids: list[str],
+    out_path: str = "exports/codegen_dataset.jsonl",
+    min_code_lines: int = 3,
+    max_per_tutorial: int | None = None,
+) -> dict:
+    """Write a messages JSONL for local code-gen fine-tuning. Returns stats."""
+    examples = build_codegen_examples(
+        tutorial_ids, min_code_lines=min_code_lines, max_per_tutorial=max_per_tutorial
+    )
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    lang_counts: dict[str, int] = {}
+    with out.open("w", encoding="utf-8") as f:
+        for ex in examples:
+            lang_counts[ex["language"]] = lang_counts.get(ex["language"], 0) + 1
+            f.write(json.dumps({"messages": ex["messages"]}, ensure_ascii=False) + "\n")
+
+    return {
+        "path": str(out),
+        "examples": len(examples),
+        "tutorials": len(tutorial_ids),
+        "by_language": dict(sorted(lang_counts.items(), key=lambda kv: kv[1], reverse=True)),
+    }
 
