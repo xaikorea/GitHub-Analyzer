@@ -4,6 +4,7 @@ import time
 import shutil
 import shlex
 import subprocess
+import hmac
 from pathlib import Path
 
 import streamlit as st
@@ -120,6 +121,15 @@ st.markdown(
       .ga-side-brand { font-weight:800; font-size:18px; color:#f0f3f8; display:flex; gap:8px; align-items:center; }
       .ga-side-label { text-transform:uppercase; letter-spacing:.6px; font-size:11px;
         color: var(--ga-text-dim); font-weight:700; margin:6px 0 2px; }
+      /* Secret status row (shows 'set/not set' — never the value) */
+      .ga-secret-row { font-size:13px; color:#c9d1d9; margin:9px 0 1px; display:flex; gap:6px; align-items:center; }
+      .ga-secret-ok { color: var(--ga-ok); font-weight:650; font-size:12px; }
+      .ga-secret-no { color: var(--ga-warn); font-weight:650; font-size:12px; }
+      /* Hide Streamlit's password reveal ("eye") button so masked secrets
+         can never be unmasked in the browser. */
+      button[aria-label="Show password text"],
+      button[aria-label="Hide password text"],
+      [data-testid="stTextInputShowPasswordButton"] { display: none !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -150,6 +160,52 @@ def empty_state(title: str, hint: str = "", icon: str = "📭"):
         f'<div class="ga-empty-hint">{hint}</div></div>',
         unsafe_allow_html=True,
     )
+
+
+def require_auth():
+    """Simple shared-credential gate so only the team can use the app.
+
+    Credentials come from APP_USERNAME / APP_PASSWORD (env or Streamlit Secrets),
+    never hardcoded — so committing the app to a repo can't leak the password.
+    If they are not configured the app stays open (with a warning) so local
+    development / first run isn't locked out.
+    """
+    expected_user = os.getenv("APP_USERNAME")
+    expected_pw = os.getenv("APP_PASSWORD")
+
+    if not expected_user or not expected_pw:
+        st.warning("🔓 로그인 미설정 (APP_USERNAME / APP_PASSWORD). 현재 누구나 접근할 수 있습니다.")
+        return
+
+    if st.session_state.get("_authed"):
+        return
+
+    _, mid, _ = st.columns([1, 1.5, 1])
+    with mid:
+        st.markdown(
+            '<div class="ga-hero" style="text-align:center;">'
+            '<span class="ga-hero-badge">🔒 팀 전용</span>'
+            '<div class="ga-hero-title">GitHub Analyzer 로그인</div>'
+            '<div class="ga-hero-sub">팀 계정으로 로그인하세요.</div></div>',
+            unsafe_allow_html=True,
+        )
+        with st.form("login_form"):
+            u = st.text_input("아이디", key="login_user")
+            p = st.text_input("비밀번호", type="password", key="login_pw")
+            submitted = st.form_submit_button("로그인", type="primary", use_container_width=True)
+        if submitted:
+            # Constant-time compare to avoid leaking length/timing.
+            ok_user = hmac.compare_digest(u or "", expected_user)
+            ok_pw = hmac.compare_digest(p or "", expected_pw)
+            if ok_user and ok_pw:
+                st.session_state["_authed"] = True
+                st.rerun()
+            else:
+                st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+    st.stop()
+
+
+require_auth()
 
 
 st.markdown(
@@ -268,12 +324,55 @@ def get_tutorials_safe():
         return []
 
 
+def secret_field(label: str, env_var: str, help: str | None = None) -> str:
+    """Render a secret config field WITHOUT ever putting the current value on screen.
+
+    Secrets are never pre-filled into inputs, so a deployed/shared app can't leak
+    them via the browser DOM or the password reveal button:
+    - If the secret already exists (env / Streamlit Secrets): show a read-only
+      'set' status and only reveal an EMPTY override input when the user opts in.
+    - If it is not set: show an empty password input so it can be entered.
+
+    Returns the user-entered override. An empty string means "keep the existing
+    environment value" (set_env_from_ui only writes non-empty values).
+    """
+    has_env = bool(os.getenv(env_var))
+    if has_env:
+        st.sidebar.markdown(
+            f'<div class="ga-secret-row">🔒 <b>{label}</b>'
+            f'<span class="ga-secret-ok">설정됨 · 환경변수/Secrets</span></div>',
+            unsafe_allow_html=True,
+        )
+        if not st.sidebar.checkbox(
+            f"{label} 이 세션에서 변경", value=False, key=f"ovr_{env_var}"
+        ):
+            return ""
+        return st.sidebar.text_input(
+            f"새 {label}", value="", type="password", key=f"in_{env_var}",
+            placeholder="새 값 입력 (이 세션에만 적용)",
+        )
+    st.sidebar.markdown(
+        f'<div class="ga-secret-row">🔓 <b>{label}</b>'
+        f'<span class="ga-secret-no">미설정</span></div>',
+        unsafe_allow_html=True,
+    )
+    return st.sidebar.text_input(
+        label, value="", type="password", key=f"in_{env_var}",
+        help=help, placeholder="아직 설정되지 않음", label_visibility="collapsed",
+    )
+
+
 # -----------------------------
 # sidebar setup
 # -----------------------------
 
 st.sidebar.markdown('<div class="ga-side-brand">🔍 GitHub Analyzer</div>', unsafe_allow_html=True)
 st.sidebar.caption("codebase → searchable knowledge base")
+
+if st.session_state.get("_authed"):
+    if st.sidebar.button("🚪 로그아웃", key="logout"):
+        st.session_state["_authed"] = False
+        st.rerun()
 st.sidebar.markdown('<div class="ga-side-label">① LLM & 연결 설정</div>', unsafe_allow_html=True)
 
 provider = st.sidebar.selectbox(
@@ -291,26 +390,16 @@ default_model = (
 model_name = st.sidebar.text_input("Model", value=default_model)
 
 api_key_label = "GEMINI_API_KEY" if provider == "GEMINI" else "OPENAI_API_KEY"
-api_key_default = os.getenv(api_key_label, "")
 
-api_key = st.sidebar.text_input(
-    api_key_label,
-    value=api_key_default,
-    type="password",
-)
-
-github_token = st.sidebar.text_input(
-    "GITHUB_TOKEN",
-    value=os.getenv("GITHUB_TOKEN", ""),
-    type="password",
+# Secrets are never pre-filled into inputs (so they can't be revealed in a
+# deployed/shared app). secret_field() shows only a 'set/not set' status and
+# requires an explicit opt-in to enter a new value for the session.
+api_key = secret_field(api_key_label, api_key_label)
+github_token = secret_field(
+    "GITHUB_TOKEN", "GITHUB_TOKEN",
     help="공개 repo만 테스트하면 비워도 되지만, rate limit 때문에 넣는 것이 좋습니다.",
 )
-
-database_url = st.sidebar.text_input(
-    "DATABASE_URL",
-    value=os.getenv("DATABASE_URL", ""),
-    type="password",
-)
+database_url = secret_field("DATABASE_URL", "DATABASE_URL")
 
 save_env = st.sidebar.checkbox("설정을 .env에 저장", value=False)
 
@@ -344,7 +433,7 @@ with st.sidebar:
     st.markdown('<div class="ga-side-label">연결 상태</div>', unsafe_allow_html=True)
     render_chips([
         status_chip("Provider", os.getenv("LLM_PROVIDER", "—") or "—", ok=bool(os.getenv("LLM_PROVIDER"))),
-        status_chip("Key", "OK" if api_key else "없음", ok=bool(api_key)),
+        status_chip("Key", "설정됨" if os.getenv(api_key_label) else "없음", ok=bool(os.getenv(api_key_label))),
         status_chip("DB", "연결됨" if os.getenv("DATABASE_URL") else "미설정", ok=bool(os.getenv("DATABASE_URL"))),
     ])
 
@@ -400,7 +489,7 @@ with tab_setup:
     col3.metric("Database", "연결됨" if os.getenv("DATABASE_URL") else "미설정")
 
     render_chips([
-        status_chip(api_key_label.replace("_API_KEY", " Key"), "OK" if api_key else "없음", ok=bool(api_key)),
+        status_chip(api_key_label.replace("_API_KEY", " Key"), "설정됨" if os.getenv(api_key_label) else "없음", ok=bool(os.getenv(api_key_label))),
         status_chip("Embeddings", "가능" if os.getenv("OPENAI_API_KEY") else "키 없음", ok=bool(os.getenv("OPENAI_API_KEY"))),
         status_chip("GitHub Token", "설정됨" if os.getenv("GITHUB_TOKEN") else "없음", ok=bool(os.getenv("GITHUB_TOKEN"))),
         status_chip("DB", "연결됨" if os.getenv("DATABASE_URL") else "미설정", ok=bool(os.getenv("DATABASE_URL"))),
