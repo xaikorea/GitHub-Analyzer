@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import hmac
 import re
+import json
 from pathlib import Path
 
 import streamlit as st
@@ -321,23 +322,31 @@ def render_mermaid(mermaid_code: str, height: int = 520):
 
     mermaid_code = _sanitize_mermaid(mermaid_code)
 
+    # Inject the diagram source as a JSON-encoded JS string (not raw HTML) so
+    # characters like & < > " in labels can't be mangled by the browser's HTML
+    # parser before Mermaid sees them. Render explicitly and surface the real
+    # error instead of Mermaid's generic "Syntax error in text" overlay.
+    code_js = json.dumps(mermaid_code)
     html = f"""
-    <div class="mermaid">
-    {mermaid_code}
-    </div>
-
+    <div id="ga-mermaid"></div>
     <script type="module">
       import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
       mermaid.initialize({{
-        startOnLoad: true,
+        startOnLoad: false,
         theme: 'dark',
         securityLevel: 'loose',
-        flowchart: {{
-          useMaxWidth: true,
-          htmlLabels: true,
-          curve: 'basis'
-        }}
+        flowchart: {{ useMaxWidth: true, htmlLabels: true, curve: 'basis' }}
       }});
+      const code = {code_js};
+      const el = document.getElementById('ga-mermaid');
+      try {{
+        const {{ svg }} = await mermaid.render('ga-mermaid-svg', code);
+        el.innerHTML = svg;
+      }} catch (e) {{
+        el.innerHTML = '<pre style="color:#f88;white-space:pre-wrap;font-size:12px">'
+          + 'Mermaid render error:\\n' + ((e && e.message) ? e.message : e)
+          + '\\n\\n--- source ---\\n' + code.replace(/</g, '&lt;') + '</pre>';
+      }}
     </script>
     """
 
