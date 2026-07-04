@@ -812,7 +812,10 @@ class CombineTutorial(Node):
         for i, abstr in enumerate(abstractions):
             node_id = f"A{i}"
             # Use potentially translated name, sanitize for Mermaid ID and label
-            sanitized_name = abstr["name"].replace('"', "")
+            # Collapse all whitespace (including embedded newlines the LLM
+            # sometimes returns in the name) to single spaces. A raw newline
+            # inside a ["..."] label breaks Mermaid (v10+ "Syntax error in text").
+            sanitized_name = " ".join(abstr["name"].replace('"', "").split())
             node_label = sanitized_name  # Using sanitized name only
             mermaid_lines.append(
                 f'    {node_id}["{node_label}"]'

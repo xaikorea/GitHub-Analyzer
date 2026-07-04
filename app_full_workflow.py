@@ -5,6 +5,7 @@ import shutil
 import shlex
 import subprocess
 import hmac
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -52,6 +53,18 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# On Streamlit Cloud, configuration is provided via st.secrets (there is no
+# .env file). The rest of the app reads config with os.getenv(), so mirror any
+# top-level string secrets into os.environ. setdefault() keeps a local .env /
+# real environment variable as the source of truth when one already exists.
+try:
+    for _sk, _sv in st.secrets.items():
+        if isinstance(_sv, str):
+            os.environ.setdefault(_sk, _sv)
+except Exception:
+    # No secrets.toml configured (e.g. plain local run) — .env / env vars only.
+    pass
 
 # -----------------------------
 # Design system (CSS) + UI helpers
@@ -287,10 +300,26 @@ def find_latest_result_dir(output_base: str):
     return latest.parent
 
 
+def _sanitize_mermaid(code: str) -> str:
+    """Deterministically fix the most common LLM Mermaid breakage: raw newlines
+    inside ["..."] node labels, which make Mermaid v10 raise "Syntax error in
+    text". Collapses whitespace inside each node label to single spaces."""
+    if not code:
+        return code
+    return re.sub(
+        r'\["(.*?)"\]',
+        lambda m: '["' + " ".join(m.group(1).split()) + '"]',
+        code,
+        flags=re.DOTALL,
+    )
+
+
 def render_mermaid(mermaid_code: str, height: int = 520):
     if not mermaid_code:
         st.info("Mermaid graph가 없습니다.")
         return
+
+    mermaid_code = _sanitize_mermaid(mermaid_code)
 
     html = f"""
     <div class="mermaid">
